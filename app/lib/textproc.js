@@ -67,8 +67,9 @@ function countWords(text) {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
-// Hesitation sounds Whisper writes out ("hum", "ahn", "é..."); never real words.
-const FILLER = /(^|[\s,;])(h+u+m+|h+m+|u+h*m+|a+h+n+|h+ã+|é+h+|é(?=\.{2,}|…))(\.{2,}|…|,)?(?=[\s,.!?;]|$)/giu;
+// Hesitation sounds Whisper writes out ("hum", "ahn", "uhm", "é..."); never real words.
+// Note: a single "um" is NOT a filler, it is the Portuguese article ("um app").
+const FILLER = /(^|[\s,;])(h+u+m+|h+m+|u+h+m+|u+m{2,}|a+h+n+|h+ã+|é+h+|é(?=\.{2,}|…))(\.{2,}|…|,)?(?=[\s,.!?;]|$)/giu;
 
 /** Removes hesitation sounds without an LLM and tidies the spacing they leave behind. */
 function removeFillers(text) {
