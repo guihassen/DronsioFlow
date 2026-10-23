@@ -599,6 +599,7 @@ function startRecording(mode, keys, locked) {
   else if (aiReady()) llm.warm(settings.ai.model); // load the model for the command
   playSound("start");
   maxTimer = setTimeout(stopRecording, MAX_RECORDING_MS);
+  silenceTimer = setTimeout(checkMicrophoneDelivers, NO_AUDIO_TIMEOUT_MS);
   levelTimer = setInterval(() => {
     if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.webContents.send("level", currentLevel);
     currentLevel *= 0.7;
@@ -606,8 +607,24 @@ function startRecording(mode, keys, locked) {
   broadcast();
 }
 
+// A Bluetooth headset can stay "connected" while its voice link (SCO) is stalled: the stream
+// opens but no audio arrives, and the level bars just sit flat. Tell the user instead.
+const NO_AUDIO_TIMEOUT_MS = 1500;
+let silenceTimer = null;
+
+function checkMicrophoneDelivers() {
+  if (state.phase !== "recording" || chunks.some((c) => c.length > 0)) return;
+  const message =
+    "O microfone não está enviando áudio. Se for um fone Bluetooth, desconecte e conecte de novo " +
+    "(ou troque o perfil dele para \"Headset\" nas configurações de som). Você também pode escolher outro " +
+    "microfone em Configurações → Geral.";
+  setError(message);
+  notify("Microfone sem áudio", message);
+}
+
 function endRecorder() {
   clearTimeout(maxTimer);
+  clearTimeout(silenceTimer);
   clearInterval(levelTimer);
   const r = recorder;
   recorder = null;

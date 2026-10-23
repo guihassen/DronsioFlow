@@ -176,7 +176,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 - Barra lateral recolhível, central de **Ajuda** com todos os atalhos e indicadores de estado: voz pronta,
   IA pronta, atalhos e colagem ok.
 - Avisos claros quando algo falha (sem permissão de teclado, modelo com erro, IA indisponível, colagem que não deu
-  certo). Se a colagem falhar, o texto fica na área de transferência.
+  certo, ou **microfone que não envia áudio** — comum com fones Bluetooth cujo link de voz travou). Se a colagem falhar, o texto fica na área de transferência.
 - Fechar ou minimizar a janela não desliga o ditado: o app continua em segundo plano. Para reabrir, abra pelo menu
   de aplicativos. Só uma instância roda por vez.
 - Ícone na bandeja do sistema nos ambientes que suportam (no GNOME, requer a extensão AppIndicator).
