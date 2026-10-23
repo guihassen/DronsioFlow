@@ -69,6 +69,7 @@ Funcionam em qualquer app, mesmo com a janela fechada.
 | Colar o último ditado | Shift + Alt + Z | cola de novo a última transcrição |
 | Copiar o último ditado | Shift + Alt + X | copia a última transcrição |
 | Transformações | um atalho por transformação | reescreve o texto selecionado |
+| Mudar de estilo | sem padrão (sugestão: Ctrl + Alt + 1…4) | um atalho por estilo e um para alternar entre eles; a barra flutuante mostra o novo estilo |
 | Cancelar | Esc | descarta a gravação atual |
 
 Os atalhos mudam em **Configurações → Atalhos**. Vale qualquer combinação de teclas, inclusive com os botões
@@ -123,6 +124,9 @@ laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a m
 ![Estilos](docs/screenshots/estilo.png)
 
 - Quatro estilos de escrita, com exemplos: **Natural**, **Formal**, **Casual** e **muito casual**.
+- **Atalhos de estilo**: um atalho para cada estilo e um para **alternar** entre eles (Natural → Formal → Casual →
+  Muito casual), em qualquer app. A barra flutuante mostra o nome do novo estilo por um instante (e avisa se a
+  formatação com IA estiver desligada, já que sem ela o estilo não é aplicado).
 - **Formatação com IA** (opcional): reescreve cada ditado no estilo escolhido. A IA nunca responde ao que você dita,
   só formata — dá para ditar prompts para outras IAs.
 - **Limpeza automática**: remover hesitações (sem IA), **autocorreções** ("às três, não, às quatro" vira "às
@@ -184,7 +188,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 | Aba | Opções |
 |---|---|
 | **Geral** | atalho de ditado, microfone, idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
-| **Atalhos** | todos os atalhos, com remover e restaurar padrão |
+| **Atalhos** | todos os atalhos (inclusive os de estilo), com remover e restaurar padrão. O app recusa um atalho que já está em uso e avisa quando a combinação também chega ao app em foco (como Ctrl+S), já que as teclas não são bloqueadas |
 | **Voz e modelo** | modelo do Whisper: Tiny (75 MB), Base (145 MB), Small (480 MB, recomendado), Medium (1,5 GB) ou Large v3 Turbo (1,6 GB), com progresso do download |
 | **IA** | liga/desliga a IA local e escolhe o modelo do Ollama |
 | **Sistema** | iniciar com o sistema, sons de início/fim, mostrar a barra quando parado, tecla de colar (Shift+Insert, Ctrl+V ou Ctrl+Shift+V), restaurar a área de transferência, abrir a pasta de dados, apagar o histórico e sair |

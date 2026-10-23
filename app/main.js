@@ -44,6 +44,11 @@ const DEFAULT_SETTINGS = {
     note: [],
     pasteLast: [KEY.shift, KEY.alt, KEY.z],
     copyLast: [KEY.shift, KEY.alt, KEY.x],
+    cycleStyle: [], // switches to the next writing style
+    "style:natural": [],
+    "style:formal": [],
+    "style:casual": [],
+    "style:veryCasual": [],
   },
   model: "small",
   language: "pt",
@@ -130,6 +135,7 @@ const state = {
   meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
   capture: null, // shortcut name being recorded from the keyboard
   lastError: null,
+  flash: null, // short message shown on the floating bar (e.g. the new writing style)
 };
 
 let mainWindow = null;
@@ -414,7 +420,13 @@ function onCaptureKey(code, down) {
   const name = state.capture;
   captureKeys = new Set();
   state.capture = null;
-  if (!(keys.length === 1 && keys[0] === KEY.esc)) {
+  const owner = keys.length && shortcutOwner(keys, name);
+  if (owner) {
+    state.lastError = `Esse atalho já é usado em "${owner}". Escolha outra combinação.`;
+  } else if (!(keys.length === 1 && keys[0] === KEY.esc)) {
+    state.lastError = reachesFocusedApp(keys)
+      ? "Atenção: o DronsioFlow não bloqueia as teclas, então o app em foco também recebe esse atalho (Ctrl+S salvaria, por exemplo). Prefira combinações com Alt ou Super."
+      : null;
     if (name.startsWith("polish:")) {
       const preset = settings.polishPresets.find((p) => `polish:${p.id}` === name);
       if (preset) preset.shortcut = keys;
@@ -430,6 +442,13 @@ function onKeyDown(code) {
   if (state.phase === "recording") {
     if (code === KEY.esc) return cancelRecording();
     const { shortcuts } = settings;
+    // A style shortcut that starts with the dictation keys (e.g. Ctrl+Super+1) began a recording
+    // by accident: drop it and switch the style instead.
+    const styleHit = !state.locked && styleShortcuts().find((s) => matches(s.keys));
+    if (styleHit) {
+      cancelRecording();
+      return applyStyleShortcut(styleHit.name);
+    }
     if (!state.locked) {
       if (matches(shortcuts.handsFree)) {
         state.locked = true; // keep recording after the keys are released
@@ -455,7 +474,65 @@ function onKeyDown(code) {
     if (history[0]) clipboard.writeText(history[0].text);
   } else if (hit.name.startsWith("polish:")) {
     runPolish(hit.name.slice(7));
+  } else if (hit.name === "cycleStyle" || hit.name.startsWith("style:")) {
+    applyStyleShortcut(hit.name);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Writing styles: switch with a shortcut, confirm on the floating bar
+// ---------------------------------------------------------------------------
+
+const STYLE_ORDER = ["natural", "formal", "casual", "veryCasual"];
+const STYLE_NAMES = { natural: "Natural", formal: "Formal", casual: "Casual", veryCasual: "Muito casual" };
+
+const SHORTCUT_NAMES = {
+  pushToTalk: "Segurar para falar",
+  handsFree: "Mãos livres",
+  command: "Modo comando",
+  note: "Nota por voz",
+  pasteLast: "Colar o último ditado",
+  copyLast: "Copiar o último ditado",
+  cycleStyle: "Alternar estilo",
+  ...Object.fromEntries(STYLE_ORDER.map((id) => [`style:${id}`, `Estilo ${STYLE_NAMES[id]}`])),
+};
+
+const styleShortcuts = () => allShortcuts().filter((s) => s.name === "cycleStyle" || s.name.startsWith("style:"));
+
+/** Name of the action already using exactly these keys, ignoring `except`. */
+function shortcutOwner(keys, except) {
+  const same = (a) => a?.length === keys.length && a.every((k) => keys.includes(k));
+  const hit = allShortcuts().find((s) => s.name !== except && same(s.keys));
+  if (!hit) return null;
+  if (hit.name.startsWith("polish:")) return settings.polishPresets.find((p) => `polish:${p.id}` === hit.name)?.name || "Transformação";
+  return SHORTCUT_NAMES[hit.name] || hit.name;
+}
+
+/** Ctrl (+Shift) + one key is what apps use for their own commands (Ctrl+S, Ctrl+F…). */
+function reachesFocusedApp(keys) {
+  const mods = keys.filter((k) => [KEY.ctrl, KEY.shift, KEY.alt, KEY.super].includes(k));
+  return keys.includes(KEY.ctrl) && !keys.includes(KEY.alt) && !keys.includes(KEY.super) && keys.length - mods.length === 1;
+}
+
+let flashTimer = null;
+function flash(message) {
+  state.flash = message;
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => {
+    state.flash = null;
+    broadcast();
+  }, 1800);
+  broadcast();
+}
+
+function applyStyleShortcut(name) {
+  const current = STYLE_ORDER.indexOf(settings.ai.style);
+  const style = name === "cycleStyle" ? STYLE_ORDER[(current + 1) % STYLE_ORDER.length] : name.slice(6);
+  if (!STYLE_ORDER.includes(style)) return;
+  settings.ai = { ...settings.ai, style };
+  saveSettings();
+  warmFormatting(); // the formatting prompt depends on the style
+  flash(useLlmFormatting() ? STYLE_NAMES[style] : `${STYLE_NAMES[style]} · IA desligada`);
 }
 
 function onKeyUp(code) {
@@ -885,7 +962,7 @@ function placeOverlay() {
 /** The bar stays as a small idle pill (always visible, unobtrusive) and grows while recording. */
 function updateOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const visible = state.phase !== "idle" || state.meeting.recording || settings.showIdleBar;
+  const visible = state.phase !== "idle" || state.meeting.recording || settings.showIdleBar || Boolean(state.flash);
   if (!visible) {
     if (overlayWindow.isVisible()) overlayWindow.hide();
     overlayPhase = null;

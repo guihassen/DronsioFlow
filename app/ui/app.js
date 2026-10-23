@@ -339,6 +339,19 @@ function pageSnippets() {
   </div></div>`;
 }
 
+const STYLE_SHORTCUTS = [
+  ["cycleStyle", "Alternar estilo", "Passa para o próximo: Natural → Formal → Casual → Muito casual."],
+  ["style:natural", "Natural", "Muda direto para o estilo Natural."],
+  ["style:formal", "Formal", "Muda direto para o estilo Formal."],
+  ["style:casual", "Casual", "Muda direto para o estilo Casual."],
+  ["style:veryCasual", "Muito casual", "Muda direto para o estilo Muito casual."],
+];
+
+function shortcutItem(name, title, desc, keys) {
+  return `<div class="item"><div><h4>${title}</h4><p>${desc}</p><div style="margin-top:6px">${keysHtml(keys, { soft: true })}</div></div>
+    <div class="control">${keys?.length ? `<button class="btn ghost small" data-act="clear-shortcut" data-arg="${name}">Remover</button>` : ""}<button class="btn secondary" data-act="capture" data-arg="${name}">${keys?.length ? "Alterar" : "Definir"}</button></div></div>`;
+}
+
 const STYLES = [
   ["natural", "Natural.", "Suas palavras, só com pontuação", "Oi, tudo bem? Amanhã eu consigo te mandar o relatório."],
   ["formal", "Formal.", "Profissional, frases completas", "Olá, tudo bem? Amanhã consigo lhe enviar o relatório."],
@@ -359,7 +372,12 @@ function pageStyle() {
     ${dismissed("style-hero") ? "" : `<div class="hero violet">${heroClose("style-hero")}<h2>Faça o DronsioFlow soar como <em>você</em></h2>
       <p>Escolha como seus ditados são escritos. A IA local aplica o estilo em qualquer app.</p></div>`}
     ${aiProblem ? `<div class="group"><div class="item"><div><h4>${esc(aiProblem)}</h4><p>Sem a IA, o ditado é instantâneo: sai como o Whisper reconheceu, sem as hesitações e com o seu dicionário.</p></div><div class="control">${state.ollama.available ? `<button class="btn" data-act="ai-on">Ligar</button>` : ""}</div></div></div>` : ""}
-    <div class="style-cards">${STYLES.map(([id, name, sub, sample]) => `<button class="style-card ${ai.style === id ? "active" : ""}" data-act="set-style" data-arg="${id}"><div><h3>${name}</h3><div class="sub">${sub}</div></div><div class="bubble">${esc(sample)}</div></button>`).join("")}</div>
+    <div class="style-cards">${STYLES.map(([id, name, sub, sample]) => `<button class="style-card ${ai.style === id ? "active" : ""}" data-act="set-style" data-arg="${id}"><div class="style-top"><div><h3>${name}</h3><div class="sub">${sub}</div></div>${settings.shortcuts[`style:${id}`]?.length ? keysHtml(settings.shortcuts[`style:${id}`], { soft: true }) : ""}</div><div class="bubble">${esc(sample)}</div></button>`).join("")}</div>
+    <div class="group-title">Atalhos de estilo</div>
+    <div class="group">
+      ${STYLE_SHORTCUTS.map(([name, title, desc]) => shortcutItem(name, title, desc, settings.shortcuts[name])).join("")}
+    </div>
+    <p class="muted" style="margin:-8px 0 24px">Funcionam em qualquer app e mostram o novo estilo na barra flutuante. O DronsioFlow não bloqueia as teclas: evite Ctrl+S, Ctrl+F e parecidos, que o app em foco também recebe. Prefira Ctrl+Alt+1…4.</p>
     <div class="group-title">Limpeza automática</div>
     <div class="group">
       <div class="item"><div><h4>Formatação com IA</h4><p>Reescreve cada ditado no estilo escolhido, aplica autocorreções e monta listas. Neste computador, acrescenta cerca de 8 s por ditado.</p></div><div class="control">${sw(ai.formatDictation && ai.enabled, 'data-ai="formatDictation"')}</div></div>
@@ -467,6 +485,8 @@ function settingsBody() {
       ([name, title, desc]) => `<div class="item"><div><h4>${title}</h4><p>${desc}</p><div style="margin-top:6px">${keysHtml(settings.shortcuts[name], { soft: true })}</div></div>
         <div class="control">${settings.shortcuts[name]?.length ? `<button class="btn ghost small" data-act="clear-shortcut" data-arg="${name}">Remover</button>` : ""}<button class="btn secondary" data-act="capture" data-arg="${name}">Alterar</button></div></div>`,
     ).join("")}</div>
+    <div class="group-title">Estilos de escrita</div>
+    <div class="group">${STYLE_SHORTCUTS.map(([name, title, desc]) => shortcutItem(name, name === "cycleStyle" ? title : `Estilo ${title}`, desc, settings.shortcuts[name])).join("")}</div>
     <p class="muted" style="margin-bottom:12px">Durante "segurar para falar", adicionar a tecla do modo mãos livres trava a gravação. <b>Esc</b> cancela. Botões laterais do mouse também valem.</p>
     <button class="btn secondary" data-act="reset-shortcuts">Restaurar padrão</button>`;
   }
@@ -509,7 +529,7 @@ function renderModal() {
   if (capture) {
     const name = capture.startsWith("polish:")
       ? S.settings.polishPresets.find((p) => `polish:${p.id}` === capture)?.name || "Transformação"
-      : SHORTCUTS.find(([n]) => n === capture)?.[1] || capture;
+      : [...SHORTCUTS, ...STYLE_SHORTCUTS.map(([n, t]) => [n, n === "cycleStyle" ? t : `Estilo ${t}`])].find(([n]) => n === capture)?.[1] || capture;
     html = `<div class="modal"><h2>Novo atalho</h2><p class="lead">${esc(name)}</p>
       <div class="capture-box">Segure as teclas juntas e solte.<br /><span class="muted">Esc sozinho cancela.</span></div>
       <div class="foot"><button class="btn secondary" data-act="cancel-capture">Cancelar</button></div></div>`;
@@ -524,6 +544,7 @@ function renderModal() {
     const sc = S.settings.shortcuts;
     html = `<div class="modal" style="width:min(600px,calc(100vw - 48px))"><h2>Atalhos</h2><p class="lead">Funcionam em qualquer app, mesmo com a janela fechada.</p>
       <div class="group">${SHORTCUTS.map(([n, t, d]) => `<div class="item"><div><h4>${t}</h4><p>${d}</p></div><div class="control">${keysHtml(sc[n], { soft: true })}</div></div>`).join("")}
+      ${STYLE_SHORTCUTS.filter(([n]) => sc[n]?.length).map(([n, t, d]) => `<div class="item"><div><h4>${n === "cycleStyle" ? t : `Estilo ${t}`}</h4><p>${d}</p></div><div class="control">${keysHtml(sc[n], { soft: true })}</div></div>`).join("")}
       <div class="item"><div><h4>Cancelar</h4><p>Descarta a gravação atual.</p></div><div class="control"><span class="kbd-soft">Esc</span></div></div></div>
       <p class="muted">Para mudar, abra Configurações → Atalhos.</p>
       <div class="foot"><button class="btn secondary" data-act="open-settings" data-arg="shortcuts">Alterar atalhos</button><button class="btn" data-act="close-modal">Entendi</button></div></div>`;

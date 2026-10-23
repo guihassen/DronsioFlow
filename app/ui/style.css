@@ -326,3 +326,4 @@ select.select {
 }
 .group .item > div:first-child { flex: 1; min-width: 0; }
 .preset textarea { resize: none; field-sizing: content; min-height: 44px; }
+.style-card .style-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
