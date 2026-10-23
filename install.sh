@@ -67,7 +67,7 @@ cat > "$HOME/.local/share/applications/dronsioflow.desktop" <<EOF
 Name=DronsioFlow
 Comment=Ditado por voz gratuito e local
 Exec=$DEST/dronsioflow.sh
-Icon=dronsioflow
+Icon=$DEST/resources/app/assets/icon.png
 Terminal=false
 Type=Application
 Categories=Utility;Accessibility;
@@ -75,7 +75,8 @@ Keywords=voz;ditado;whisper;transcrição;
 StartupWMClass=dronsioflow
 EOF
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
-gtk-update-icon-cache -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+# -f/-t: rebuild even without an index.theme, so a stale user cache never hides the icon
+gtk-update-icon-cache -f -t -q "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
 
 readable=0
 for dev in /dev/input/event*; do [ -r "$dev" ] && { readable=1; break; }; done

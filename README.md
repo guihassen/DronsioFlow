@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/assets/icon.png" width="128" alt="Ícone do DronsioFlow" />
+</p>
+
 # DronsioFlow
 
 Ditado por voz **gratuito e 100% local** para Linux. Segure um atalho, fale e solte: o texto é colado onde
