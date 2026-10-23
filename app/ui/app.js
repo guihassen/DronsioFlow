@@ -482,6 +482,7 @@ function settingsBody() {
     const models = state.ollama.models.length ? state.ollama.models : settings.ai.model ? [settings.ai.model] : [];
     return `<h2>IA local</h2><div class="group">
       <div class="item"><div><h4>IA local (Ollama)</h4><p>Usada no modo comando, nas transformações, no resumo de reuniões e, se ligada em Estilo, nos ditados.</p></div><div class="control">${sw(settings.ai.enabled, 'data-ai="enabled"')}</div></div>
+      <div class="item"><div><h4>Formatar ditados com IA</h4><p>Reescreve cada ditado no estilo escolhido em Estilo, com autocorreções e listas. Acrescenta alguns segundos por ditado.</p></div><div class="control">${sw(settings.ai.formatDictation && settings.ai.enabled, 'data-ai="formatDictation"')}</div></div>
       <div class="item"><div><h4>Modelo do Ollama</h4><p>${state.ollama.available ? `${state.ollama.models.length} modelo(s) instalado(s). Modelos menores respondem mais rápido.` : "Ollama não encontrado em localhost:11434."}</p></div>
         <div class="control"><select class="select" data-ai-select="model">${optionList(models.map((m) => [m, m]), settings.ai.model)}</select><button class="icon-btn" data-act="refresh-ollama" title="Atualizar lista">${icon("search", 16)}</button></div></div>
     </div>`;
