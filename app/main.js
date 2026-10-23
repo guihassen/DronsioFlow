@@ -366,11 +366,15 @@ const aiReady = () => settings.ai.enabled && state.ollama.available && Boolean(s
 const useLlmFormatting = () =>
   aiReady() && (settings.ai.formatDictation || (Boolean(settings.ai.translateTo) && settings.ai.translateTo !== "en"));
 
-const formattingPrompt = () => llm.formattingSystemPrompt({ ...settings.ai, terms: text.dictionaryTerms(settings.dictionary) });
+const formattingPrompt = (language) =>
+  llm.formattingSystemPrompt({ ...settings.ai, language, terms: text.dictionaryTerms(settings.dictionary) });
+
+// Language to warm the prompt cache with before we know what the user will say.
+const expectedLanguage = () => (settings.language && settings.language !== "auto" ? settings.language : "pt");
 
 /** Keeps the dictation formatting prompt in Ollama's cache. */
 function warmFormatting() {
-  if (useLlmFormatting()) llm.warm(settings.ai.model, formattingPrompt());
+  if (useLlmFormatting()) llm.warm(settings.ai.model, formattingPrompt(expectedLanguage()));
 }
 
 // ---------------------------------------------------------------------------
@@ -726,7 +730,7 @@ async function stopRecording() {
     const raw = result.text.trim();
     if (!raw) return;
     if (mode === "command") await handleCommand(raw, duration);
-    else await handleDictation(raw, duration, result.ms, mode === "note");
+    else await handleDictation(raw, duration, result.ms, mode === "note", result.language);
   } catch (e) {
     setError(`Falha na transcrição: ${e.message}`);
   } finally {
@@ -735,7 +739,7 @@ async function stopRecording() {
   }
 }
 
-async function formatDictation(raw) {
+async function formatDictation(raw, whisperLanguage) {
   let fixed = text.applyDictionary(raw, settings.dictionary);
   if (settings.ai.removeFillers) fixed = text.removeFillers(fixed); // instant, works without the LLM
   const snippet = text.exactSnippet(fixed, settings.snippets);
@@ -745,7 +749,16 @@ async function formatDictation(raw) {
     state.step = "formatting";
     broadcast();
     try {
-      out = (await llm.generate(settings.ai.model, formattingPrompt(), llm.formattingUserPrompt(fixed), { timeoutMs: 60000 })) || fixed;
+      // What the user actually spoke: the words themselves when clear, else Whisper's detection.
+      const spoken = text.guessLanguage(fixed) || whisperLanguage || expectedLanguage();
+      const rewritten = await llm.generate(settings.ai.model, formattingPrompt(spoken), llm.formattingUserPrompt(fixed, spoken), { timeoutMs: 60000 });
+      const outLanguage = rewritten && text.guessLanguage(rewritten);
+      if (!settings.ai.translateTo && outLanguage && outLanguage !== spoken && ["pt", "en"].includes(spoken)) {
+        // Safety net: the model translated without being asked; keep the user's own words.
+        console.log(`[format] IA respondeu em ${outLanguage} para um ditado em ${spoken}; usando o texto do Whisper`);
+      } else {
+        out = rewritten || fixed;
+      }
     } catch (e) {
       setError(`IA indisponível, usei o texto sem formatação (${e.message}).`);
     }
@@ -759,8 +772,8 @@ function addHistory(entry) {
   writeJson(FILES.history, history);
 }
 
-async function handleDictation(raw, durationMs, processingMs, asNote) {
-  const final = await formatDictation(raw);
+async function handleDictation(raw, durationMs, processingMs, asNote, language) {
+  const final = await formatDictation(raw, language);
   if (!final) return;
   if (asNote) {
     notes.unshift({ id: newId(), at: new Date().toISOString(), text: final });

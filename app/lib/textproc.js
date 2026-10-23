@@ -83,4 +83,22 @@ function removeFillers(text) {
   return out.replace(/^\p{Ll}/u, (c) => c.toUpperCase());
 }
 
-module.exports = { normalize, applyDictionary, exactSnippet, expandSnippets, dictionaryTerms, countWords, removeFillers };
+// Very common words that (almost) only exist in one of the two languages.
+const MARKERS = {
+  pt: new Set("que não para uma com você está mas isso então eu os as do da no na dos das pra também muito ele ela são foi tem vai quando porque meu minha".split(" ")),
+  en: new Set("the and you is are to of it that this but for with what so my i'm don't was have will can just when because about they there".split(" ")),
+};
+
+/** "pt", "en", or null when the text is too short or mixed to tell. */
+function guessLanguage(text) {
+  const words = text.toLowerCase().match(/[\p{L}']+/gu) || [];
+  const score = (lang) => words.filter((w) => MARKERS[lang].has(w)).length;
+  const pt = score("pt");
+  const en = score("en");
+  if (pt + en < 3) return null;
+  if (pt >= 2 * en) return "pt";
+  if (en >= 2 * pt) return "en";
+  return null;
+}
+
+module.exports = { normalize, applyDictionary, exactSnippet, expandSnippets, dictionaryTerms, countWords, removeFillers, guessLanguage };
