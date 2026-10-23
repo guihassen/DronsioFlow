@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+    <style>
+      html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+      body { display: flex; align-items: flex-end; justify-content: center; padding-bottom: 10px; box-sizing: border-box; }
+      .pill {
+        display: flex; align-items: center; justify-content: center; gap: 3px;
+        width: 40px; height: 8px; border-radius: 99px;
+        background: rgb(52 52 50 / .82);
+        transition: width .22s cubic-bezier(.3,.7,.2,1), height .22s cubic-bezier(.3,.7,.2,1), background .2s;
+        box-shadow: 0 0 0 1px rgb(255 255 255 / .08);
+        overflow: hidden;
+      }
+      .pill.active { width: 112px; height: 36px; background: #0d0d0d; box-shadow: 0 6px 20px rgb(0 0 0 / .35), 0 0 0 1px rgb(255 255 255 / .12); }
+      .pill.locked { width: 132px; }
+      .bars { display: none; align-items: center; gap: 3px; height: 22px; }
+      .bars i { width: 3px; height: 3px; border-radius: 2px; background: #fff; transition: height 70ms linear; }
+      .dots { display: none; gap: 5px; }
+      .dots i { width: 5px; height: 5px; border-radius: 50%; background: #fff; opacity: .35; animation: blink 1s infinite; }
+      .dots i:nth-child(2) { animation-delay: .15s; } .dots i:nth-child(3) { animation-delay: .3s; }
+      @keyframes blink { 40% { opacity: 1; transform: translateY(-2px); } }
+      .mark { display: none; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; flex-shrink: 0; }
+      .mark.command { display: block; background: #d2ace9; }
+      .mark.note { display: block; background: #ffa946; }
+      .lock { display: none; color: #fff; opacity: .7; margin-left: 6px; }
+      .pill.recording .bars, .pill.processing .dots { display: flex; }
+      .pill.locked .lock { display: block; }
+      .meeting { position: absolute; display: none; width: 8px; height: 8px; border-radius: 50%; background: #ff5757; margin-left: 52px; bottom: 10px; }
+      body.meeting-on .meeting { display: block; }
+      @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+    </style>
+  </head>
+  <body>
+    <div id="pill" class="pill">
+      <span id="mark" class="mark"></span>
+      <div id="bars" class="bars"></div>
+      <div class="dots"><i></i><i></i><i></i></div>
+      <svg class="lock" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </div>
+    <span class="meeting" title="Gravando reunião"></span>
+    <script>
+      const pill = document.getElementById("pill");
+      const bars = document.getElementById("bars");
+      const N = 15;
+      for (let i = 0; i < N; i++) bars.appendChild(document.createElement("i"));
+      const weight = (i) => 0.35 + 0.65 * Math.sin((Math.PI * (i + 0.5)) / N);
+      window.dronsio.onLevel((level) => {
+        [...bars.children].forEach((b, i) => {
+          const jitter = 0.6 + Math.random() * 0.8;
+          b.style.height = `${Math.max(3, Math.min(22, 3 + level * 22 * weight(i) * jitter))}px`;
+        });
+      });
+      function apply({ state }) {
+        const rec = state.phase === "recording";
+        const busy = state.phase === "processing";
+        pill.className = "pill" + (rec || busy ? " active" : "") + (rec ? " recording" : "") + (busy ? " processing" : "") + (rec && state.locked ? " locked" : "");
+        const mark = document.getElementById("mark");
+        mark.className = "mark" + (rec && state.mode !== "dictation" ? ` ${state.mode}` : "");
+        document.body.classList.toggle("meeting-on", state.meeting.recording && !rec && !busy);
+        if (!rec) [...bars.children].forEach((b) => (b.style.height = "3px"));
+      }
+      window.dronsio.onState(apply);
+      window.dronsio.getState().then(apply);
+    </script>
+  </body>
+</html>

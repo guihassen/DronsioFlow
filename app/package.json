@@ -1,0 +1,10 @@
+{
+  "name": "dronsioflow",
+  "productName": "DronsioFlow",
+  "version": "1.0.0",
+  "description": "Ditado por voz gratuito e local para Linux",
+  "main": "main.js",
+  "desktopName": "dronsioflow.desktop",
+  "license": "MIT",
+  "author": "guihassen (https://github.com/guihassen)"
+}

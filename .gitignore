@@ -1,0 +1,13 @@
+# Electron runtime downloaded by install.sh
+vendor/
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,1040 @@
+// DronsioFlow — free, local voice dictation for Linux.
+const { app, BrowserWindow, ipcMain, screen, clipboard, Tray, Menu, nativeImage, shell, Notification, nativeTheme } = require("electron");
+const { spawn, execFile } = require("child_process");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const text = require("./lib/textproc");
+const llm = require("./lib/llm");
+
+app.setName("DronsioFlow");
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+
+const DATA_DIR = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "dronsioflow");
+const PYTHON = process.env.DRONSIO_PYTHON || path.join(DATA_DIR, "venv", "bin", "python");
+const NATIVE = path.join(__dirname, "native");
+const USER_DIR = app.getPath("userData");
+const FILES = {
+  settings: path.join(USER_DIR, "settings.json"),
+  history: path.join(USER_DIR, "history.json"),
+  notes: path.join(USER_DIR, "notes.json"),
+  meetings: path.join(USER_DIR, "meetings.json"),
+};
+const TMP_DIR = path.join(os.tmpdir(), `dronsioflow-${process.getuid()}`);
+const SAMPLE_RATE = 16000;
+const MIN_RECORDING_MS = 300;
+const MAX_RECORDING_MS = 10 * 60 * 1000;
+const MAX_MEETING_MS = 4 * 60 * 60 * 1000;
+
+// evdev key codes; right-hand modifiers are folded into the left ones.
+const KEY = { ctrl: 29, shift: 42, alt: 56, super: 125, space: 57, esc: 1, z: 44, x: 45 };
+const NORMALIZE = { 97: 29, 54: 42, 100: 56, 126: 125 };
+
+// Shortcuts that record while held (or toggle, for handsFree) and the mode they record in.
+const RECORDING_ACTIONS = { pushToTalk: "dictation", handsFree: "dictation", command: "command", note: "note" };
+
+const DEFAULT_SETTINGS = {
+  shortcuts: {
+    pushToTalk: [KEY.ctrl, KEY.super],
+    handsFree: [KEY.ctrl, KEY.super, KEY.space],
+    command: [KEY.ctrl, KEY.super, KEY.alt],
+    note: [],
+    pasteLast: [KEY.shift, KEY.alt, KEY.z],
+    copyLast: [KEY.shift, KEY.alt, KEY.x],
+  },
+  model: "small",
+  language: "pt",
+  microphone: "",
+  dictionary: [], // { term, heardAs }
+  snippets: [], // { id, trigger, text }
+  pasteKeys: "shift+insert",
+  restoreClipboard: true,
+  sounds: true,
+  ai: {
+    enabled: true, // Ollama features: command mode, transforms, meeting summaries
+    formatDictation: false, // also rewrite every dictation (slow on CPU: ~8 s)
+    model: "",
+    style: "natural",
+    removeFillers: true,
+    selfCorrections: true,
+    lists: true,
+    translateTo: "",
+  },
+  polishPresets: llm.DEFAULT_POLISH_PRESETS,
+  meetingSystemAudio: true,
+  autostart: false,
+  theme: "system", // system | light | dark
+  showIdleBar: true,
+  dismissed: [], // intro banners the user closed
+};
+
+// ---------------------------------------------------------------------------
+// Persistence
+// ---------------------------------------------------------------------------
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(file, data) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + ".tmp", JSON.stringify(data, null, 2));
+  fs.renameSync(file + ".tmp", file);
+}
+
+function mergeDefaults(saved) {
+  const merged = {
+    ...DEFAULT_SETTINGS,
+    ...saved,
+    shortcuts: { ...DEFAULT_SETTINGS.shortcuts, ...(saved.shortcuts || {}) },
+    ai: { ...DEFAULT_SETTINGS.ai, ...(saved.ai || {}) },
+  };
+  // v1 kept a free-form vocabulary box; turn it into dictionary terms
+  if (saved.vocabulary && !saved.dictionary) {
+    merged.dictionary = saved.vocabulary
+      .split(/[,\n]/)
+      .map((t) => ({ term: t.trim(), heardAs: "" }))
+      .filter((e) => e.term);
+  }
+  delete merged.vocabulary;
+  return merged;
+}
+
+let settings = mergeDefaults(readJson(FILES.settings, {}));
+let history = readJson(FILES.history, []);
+let notes = readJson(FILES.notes, []);
+let meetings = readJson(FILES.meetings, []);
+
+const saveSettings = () => writeJson(FILES.settings, settings);
+const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+
+// ---------------------------------------------------------------------------
+// App state (pushed to the UI)
+// ---------------------------------------------------------------------------
+
+const state = {
+  phase: "idle", // idle | recording | processing
+  mode: null, // dictation | command | note
+  locked: false, // hands-free
+  step: null, // transcribing | formatting
+  model: { name: settings.model, state: "idle", progress: 0, error: null },
+  input: { keyboards: 0, uinput: false, running: false },
+  ollama: { available: false, models: [] },
+  meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
+  capture: null, // shortcut name being recorded from the keyboard
+  lastError: null,
+};
+
+let mainWindow = null;
+let overlayWindow = null;
+let tray = null;
+
+// First name from the account's full name (GECOS), falling back to the login name.
+const USER_NAME = process.env.DRONSIO_USER_NAME ?? (() => {
+  try {
+    const line = fs.readFileSync("/etc/passwd", "utf8").split("\n").find((l) => l.split(":")[2] === String(process.getuid()));
+    const full = line?.split(":")[4]?.split(",")[0]?.trim();
+    if (full) return full.split(/\s+/)[0];
+  } catch {}
+  const login = os.userInfo().username;
+  return login.charAt(0).toUpperCase() + login.slice(1);
+})();
+
+function snapshot() {
+  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME };
+}
+
+function broadcast() {
+  const payload = snapshot();
+  for (const w of [mainWindow, overlayWindow]) {
+    if (w && !w.isDestroyed()) w.webContents.send("state", payload);
+  }
+  updateOverlay();
+}
+
+function stats() {
+  const today = new Date().toDateString();
+  let words = 0;
+  let wordsToday = 0;
+  let speakingMs = 0;
+  let spokenWords = 0;
+  const days = new Set();
+  for (const h of history) {
+    const n = text.countWords(h.text);
+    const d = new Date(h.at);
+    words += n;
+    days.add(d.toDateString());
+    if (d.toDateString() === today) wordsToday += n;
+    if (h.durationMs && h.raw) {
+      speakingMs += h.durationMs;
+      spokenWords += text.countWords(h.raw);
+    }
+  }
+  let streak = 0;
+  for (let d = new Date(); days.has(d.toDateString()); d.setDate(d.getDate() - 1)) streak++;
+  const wpm = speakingMs > 0 ? Math.round(spokenWords / (speakingMs / 60000)) : 0;
+  return { words, wordsToday, count: history.length, wpm, streak };
+}
+
+function setError(message) {
+  state.lastError = message;
+  broadcast();
+}
+
+function notify(title, body) {
+  if (Notification.isSupported()) new Notification({ title, body, icon: ICON, silent: true }).show();
+}
+
+// ---------------------------------------------------------------------------
+// Child processes: input helper and transcription engine (JSON lines)
+// ---------------------------------------------------------------------------
+
+function spawnJsonProcess(name, script, onMessage, onExit) {
+  const child = spawn(PYTHON, ["-I", path.join(NATIVE, script)], { stdio: ["pipe", "pipe", "pipe"] });
+  let buf = "";
+  child.stdout.on("data", (d) => {
+    buf += d.toString("utf8");
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      if (!line.trim()) continue;
+      try {
+        onMessage(JSON.parse(line));
+      } catch {
+        console.warn(`[${name}] bad line`, line);
+      }
+    }
+  });
+  child.stderr.on("data", (d) => process.stderr.write(`[${name}] ${d}`));
+  child.on("error", (e) => console.error(`[${name}]`, e.message));
+  child.on("exit", (code) => onExit(code));
+  child.send = (obj) => {
+    if (child.stdin.writable) child.stdin.write(JSON.stringify(obj) + "\n");
+  };
+  return child;
+}
+
+let inputHelper = null;
+let engine = null;
+const pending = new Map(); // request id -> { resolve, reject, onProgress }
+
+function request(child, cmd, { timeoutMs, onProgress } = {}) {
+  const id = newId();
+  return new Promise((resolve, reject) => {
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          pending.delete(id);
+          reject(new Error("tempo esgotado"));
+        }, timeoutMs)
+      : null;
+    pending.set(id, {
+      resolve: (v) => (clearTimeout(timer), resolve(v)),
+      reject: (e) => (clearTimeout(timer), reject(e)),
+      onProgress,
+    });
+    child.send({ ...cmd, id });
+  });
+}
+
+function settle(msg) {
+  const p = pending.get(msg.id);
+  if (!p) return;
+  pending.delete(msg.id);
+  msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg);
+}
+
+function startInputHelper() {
+  inputHelper = spawnJsonProcess("input", "input_helper.py", onInputMessage, () => {
+    state.input = { keyboards: 0, uinput: false, running: false };
+    broadcast();
+    if (!quitting) setTimeout(startInputHelper, 2000);
+  });
+  state.input.running = true;
+}
+
+function startEngine() {
+  engine = spawnJsonProcess("engine", "transcriber.py", onEngineMessage, () => {
+    for (const [id, p] of pending) {
+      p.reject(new Error("motor de transcrição reiniciou"));
+      pending.delete(id);
+    }
+    state.model.state = "idle";
+    broadcast();
+    if (!quitting)
+      setTimeout(() => {
+        startEngine();
+        loadModel();
+      }, 2000);
+  });
+}
+
+function loadModel() {
+  state.model = { name: settings.model, state: "loading", progress: 0, error: null };
+  broadcast();
+  engine.send({ cmd: "load", model: settings.model });
+}
+
+function onEngineMessage(msg) {
+  if (msg.t === "model") {
+    state.model = {
+      name: msg.model,
+      state: msg.state,
+      progress: msg.progress ?? (msg.state === "ready" ? 1 : state.model.progress),
+      error: msg.error || null,
+    };
+    broadcast();
+  } else if (msg.t === "progress") {
+    pending.get(msg.id)?.onProgress?.(msg.progress);
+  } else if (msg.t === "result") {
+    settle(msg);
+  }
+}
+
+function transcribe(files, { task = "transcribe", progress } = {}) {
+  return request(
+    engine,
+    {
+      cmd: "transcribe",
+      paths: files,
+      language: settings.language,
+      task,
+      prompt: text.dictionaryTerms(settings.dictionary).join(", "),
+      progress: Boolean(progress),
+    },
+    { onProgress: progress },
+  );
+}
+
+function paste(content) {
+  return request(
+    inputHelper,
+    { cmd: "paste", text: content, keys: settings.pasteKeys, restoreClipboard: settings.restoreClipboard },
+    { timeoutMs: 6000 },
+  ).catch(() => ({ ok: false, reason: "timeout" }));
+}
+
+function readSelection() {
+  return request(inputHelper, { cmd: "selection" }, { timeoutMs: 2000 })
+    .then((m) => m.text || "")
+    .catch(() => "");
+}
+
+async function pasteOrCopy(content) {
+  const result = process.env.DRONSIO_TEST_NO_PASTE ? { ok: true } : await paste(content);
+  if (!result.ok) {
+    clipboard.writeText(content);
+    setError("Não consegui colar automaticamente; o texto está na área de transferência.");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ollama availability
+// ---------------------------------------------------------------------------
+
+// Best quality/speed/memory trade-off measured on a 16 GB laptop CPU (tools/bench_llm.mjs).
+const PREFERRED_MODELS = ["gemma4:e2b", "gemma3:4b", "gemma3:1b"];
+
+async function refreshOllama() {
+  const models = await llm.listModels();
+  state.ollama = { available: models !== null, models: models || [] };
+  if (models?.length && !settings.ai.model) {
+    settings.ai.model = models.find((m) => PREFERRED_MODELS.includes(m)) || models[0];
+    saveSettings();
+  }
+  broadcast();
+  return models;
+}
+
+const aiReady = () => settings.ai.enabled && state.ollama.available && Boolean(settings.ai.model);
+
+// Dictations go through the LLM only when asked to: formatting, or a translation Whisper can't do.
+const useLlmFormatting = () =>
+  aiReady() && (settings.ai.formatDictation || (Boolean(settings.ai.translateTo) && settings.ai.translateTo !== "en"));
+
+const formattingPrompt = () => llm.formattingSystemPrompt({ ...settings.ai, terms: text.dictionaryTerms(settings.dictionary) });
+
+/** Keeps the dictation formatting prompt in Ollama's cache. */
+function warmFormatting() {
+  if (useLlmFormatting()) llm.warm(settings.ai.model, formattingPrompt());
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard shortcuts
+// ---------------------------------------------------------------------------
+
+const pressed = new Set();
+let chord = 0; // increments every time all keys are released
+let lockChord = 0;
+let activeKeys = []; // keys of the shortcut that is currently recording
+let captureKeys = new Set();
+let selectionPromise = null;
+
+const matches = (keys) => keys?.length > 0 && keys.length === pressed.size && keys.every((k) => pressed.has(k));
+
+function allShortcuts() {
+  const list = Object.entries(settings.shortcuts).map(([name, keys]) => ({ name, keys }));
+  for (const p of settings.polishPresets) {
+    if (p.shortcut?.length) list.push({ name: `polish:${p.id}`, keys: p.shortcut });
+  }
+  return list;
+}
+
+function onInputMessage(msg) {
+  if (msg.t === "status") {
+    state.input = { keyboards: msg.keyboards, uinput: msg.uinput, running: true };
+    broadcast();
+  } else if (msg.t === "pasted" || msg.t === "selection") {
+    settle(msg);
+  } else if (msg.t === "key") {
+    const code = NORMALIZE[msg.code] ?? msg.code;
+    if (msg.down) pressed.add(code);
+    else pressed.delete(code);
+    if (state.capture) onCaptureKey(code, msg.down);
+    else if (msg.down) onKeyDown(code);
+    else onKeyUp(code);
+    if (pressed.size === 0) chord++;
+  }
+}
+
+function onCaptureKey(code, down) {
+  if (down) {
+    captureKeys.add(code);
+    return;
+  }
+  if (pressed.size > 0 || captureKeys.size === 0) return;
+  const keys = [...captureKeys];
+  const name = state.capture;
+  captureKeys = new Set();
+  state.capture = null;
+  if (!(keys.length === 1 && keys[0] === KEY.esc)) {
+    if (name.startsWith("polish:")) {
+      const preset = settings.polishPresets.find((p) => `polish:${p.id}` === name);
+      if (preset) preset.shortcut = keys;
+    } else {
+      settings.shortcuts[name] = keys;
+    }
+    saveSettings();
+  }
+  broadcast();
+}
+
+function onKeyDown(code) {
+  if (state.phase === "recording") {
+    if (code === KEY.esc) return cancelRecording();
+    const { shortcuts } = settings;
+    if (!state.locked) {
+      if (matches(shortcuts.handsFree)) {
+        state.locked = true; // keep recording after the keys are released
+        lockChord = chord;
+        return broadcast();
+      }
+      for (const name of ["command", "note"]) {
+        if (matches(shortcuts[name]) && state.mode !== RECORDING_ACTIONS[name]) return switchMode(RECORDING_ACTIONS[name], shortcuts[name]);
+      }
+    } else if (chord > lockChord && (matches(shortcuts.handsFree) || matches(shortcuts.pushToTalk))) {
+      stopRecording();
+    }
+    return;
+  }
+  if (state.phase !== "idle") return;
+  const hit = allShortcuts().find((s) => matches(s.keys));
+  if (!hit) return;
+  if (hit.name in RECORDING_ACTIONS) {
+    startRecording(RECORDING_ACTIONS[hit.name], hit.keys, hit.name === "handsFree");
+  } else if (hit.name === "pasteLast") {
+    if (history[0]) pasteOrCopy(history[0].text);
+  } else if (hit.name === "copyLast") {
+    if (history[0]) clipboard.writeText(history[0].text);
+  } else if (hit.name.startsWith("polish:")) {
+    runPolish(hit.name.slice(7));
+  }
+}
+
+function onKeyUp(code) {
+  if (state.phase === "recording" && !state.locked && activeKeys.includes(code)) stopRecording();
+}
+
+function switchMode(mode, keys) {
+  state.mode = mode;
+  activeKeys = keys;
+  if (mode === "command") selectionPromise = readSelection();
+  broadcast();
+}
+
+// ---------------------------------------------------------------------------
+// Recording (PipeWire/PulseAudio via parecord, raw PCM on stdout)
+// ---------------------------------------------------------------------------
+
+let recorder = null;
+let chunks = [];
+let recordingStartedAt = 0;
+let maxTimer = null;
+let levelTimer = null;
+let currentLevel = 0;
+
+function playSound(name) {
+  if (!settings.sounds) return;
+  const file = path.join(__dirname, "assets", "sounds", `${name}.wav`);
+  spawn("pw-play", [file], { stdio: "ignore" }).on("error", () =>
+    spawn("paplay", [file], { stdio: "ignore" }).on("error", () => {}),
+  );
+}
+
+function recordArgs(device, latencyMs = 20) {
+  const args = ["--raw", "--format=s16le", `--rate=${SAMPLE_RATE}`, "--channels=1", `--latency-msec=${latencyMs}`];
+  if (device) args.push(`--device=${device}`);
+  return args;
+}
+
+function startRecording(mode, keys, locked) {
+  if (state.model.state !== "ready") {
+    setError("O modelo de voz ainda não está pronto.");
+    showMainWindow();
+    return;
+  }
+  chunks = [];
+  currentLevel = 0;
+  recorder = spawn("parecord", recordArgs(settings.microphone), { stdio: ["ignore", "pipe", "pipe"] });
+  recorder.stdout.on("data", (d) => {
+    chunks.push(d);
+    let peak = 0;
+    for (let i = 0; i + 1 < d.length; i += 2) peak = Math.max(peak, Math.abs(d.readInt16LE(i)));
+    currentLevel = Math.max(currentLevel * 0.6, Math.min(1, peak / 12000));
+  });
+  recorder.on("error", (e) => {
+    setError(`Falha ao gravar: ${e.message}`);
+    resetToIdle();
+  });
+  recordingStartedAt = Date.now();
+  Object.assign(state, { phase: "recording", mode, locked, step: null, lastError: null });
+  activeKeys = keys;
+  lockChord = chord;
+  selectionPromise = mode === "command" ? readSelection() : null;
+  if (mode !== "command") warmFormatting(); // evaluate the prompt while the user speaks
+  else if (aiReady()) llm.warm(settings.ai.model); // load the model for the command
+  playSound("start");
+  maxTimer = setTimeout(stopRecording, MAX_RECORDING_MS);
+  levelTimer = setInterval(() => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.webContents.send("level", currentLevel);
+    currentLevel *= 0.7;
+  }, 50);
+  broadcast();
+}
+
+function endRecorder() {
+  clearTimeout(maxTimer);
+  clearInterval(levelTimer);
+  const r = recorder;
+  recorder = null;
+  return new Promise((resolve) => {
+    if (!r || r.exitCode !== null) return resolve();
+    r.on("exit", () => resolve());
+    setTimeout(() => r.kill("SIGTERM"), 120); // let parecord flush the last buffer
+  });
+}
+
+function resetToIdle() {
+  Object.assign(state, { phase: "idle", mode: null, locked: false, step: null });
+  activeKeys = [];
+  broadcast();
+}
+
+async function cancelRecording() {
+  await endRecorder();
+  chunks = [];
+  resetToIdle();
+}
+
+function wavFromPcm(pcm) {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(SAMPLE_RATE, 24);
+  header.writeUInt32LE(SAMPLE_RATE * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+async function stopRecording() {
+  if (state.phase !== "recording") return;
+  const duration = Date.now() - recordingStartedAt;
+  const mode = state.mode;
+  await endRecorder();
+  playSound("stop");
+  if (duration < MIN_RECORDING_MS) {
+    chunks = [];
+    return resetToIdle();
+  }
+  Object.assign(state, { phase: "processing", step: "transcribing" });
+  broadcast();
+  // DRONSIO_TEST_WAV replaces the microphone audio (16 kHz mono WAV) for testing.
+  const pcm = process.env.DRONSIO_TEST_WAV
+    ? fs.readFileSync(process.env.DRONSIO_TEST_WAV).subarray(44)
+    : Buffer.concat(chunks);
+  chunks = [];
+  fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
+  const file = path.join(TMP_DIR, `rec-${Date.now()}.wav`);
+  fs.writeFileSync(file, wavFromPcm(pcm), { mode: 0o600 });
+  try {
+    // Without the LLM, Whisper itself can translate to English.
+    const task = mode === "dictation" && settings.ai.translateTo === "en" && !useLlmFormatting() ? "translate" : "transcribe";
+    const result = await transcribe([file], { task });
+    const raw = result.text.trim();
+    if (!raw) return;
+    if (mode === "command") await handleCommand(raw, duration);
+    else await handleDictation(raw, duration, result.ms, mode === "note");
+  } catch (e) {
+    setError(`Falha na transcrição: ${e.message}`);
+  } finally {
+    fs.rm(file, { force: true }, () => {});
+    resetToIdle();
+  }
+}
+
+async function formatDictation(raw) {
+  let fixed = text.applyDictionary(raw, settings.dictionary);
+  if (settings.ai.removeFillers) fixed = text.removeFillers(fixed); // instant, works without the LLM
+  const snippet = text.exactSnippet(fixed, settings.snippets);
+  if (snippet !== null) return snippet;
+  let out = fixed;
+  if (useLlmFormatting()) {
+    state.step = "formatting";
+    broadcast();
+    try {
+      out = (await llm.generate(settings.ai.model, formattingPrompt(), llm.formattingUserPrompt(fixed), { timeoutMs: 60000 })) || fixed;
+    } catch (e) {
+      setError(`IA indisponível, usei o texto sem formatação (${e.message}).`);
+    }
+  }
+  return text.expandSnippets(out, settings.snippets);
+}
+
+function addHistory(entry) {
+  history.unshift({ at: new Date().toISOString(), ...entry });
+  history = history.slice(0, 1000);
+  writeJson(FILES.history, history);
+}
+
+async function handleDictation(raw, durationMs, processingMs, asNote) {
+  const final = await formatDictation(raw);
+  if (!final) return;
+  if (asNote) {
+    notes.unshift({ id: newId(), at: new Date().toISOString(), text: final });
+    writeJson(FILES.notes, notes);
+    notify("Nota salva", final.slice(0, 120));
+  } else {
+    await pasteOrCopy(final);
+  }
+  addHistory({ text: final, raw, durationMs, processingMs, kind: asNote ? "note" : "dictation" });
+}
+
+async function handleCommand(instruction, durationMs) {
+  const selection = (await selectionPromise) || "";
+  selectionPromise = null;
+  if (!aiReady()) {
+    setError("O modo comando precisa da IA (Ollama). Ative em Estilo e IA.");
+    return;
+  }
+  state.step = "formatting";
+  broadcast();
+  try {
+    const out = selection
+      ? await llm.generate(settings.ai.model, llm.COMMAND_WITH_SELECTION, `INSTRUÇÃO: ${instruction}\n\nTEXTO SELECIONADO:\n${selection}`, { timeoutMs: 90000 })
+      : await llm.generate(settings.ai.model, llm.COMMAND_WITHOUT_SELECTION, instruction, { timeoutMs: 90000 });
+    if (!out) return;
+    await pasteOrCopy(out);
+    addHistory({ text: out, raw: instruction, durationMs, kind: "command", selection: selection.slice(0, 2000) });
+  } catch (e) {
+    setError(`Falha no modo comando: ${e.message}`);
+  } finally {
+    warmFormatting();
+  }
+}
+
+async function runPolish(presetId) {
+  const preset = settings.polishPresets.find((p) => p.id === presetId);
+  if (!preset) return;
+  if (!aiReady()) return setError("O Polish precisa da IA (Ollama). Ative em Estilo e IA.");
+  const selection = await readSelection();
+  if (!selection.trim()) {
+    notify("Polish", "Selecione um texto antes de usar o atalho.");
+    return;
+  }
+  Object.assign(state, { phase: "processing", mode: "command", step: "formatting" });
+  broadcast();
+  try {
+    const system = `${preset.prompt}\nDevolva somente o texto reescrito, sem aspas e sem explicações.`;
+    const out = await llm.generate(settings.ai.model, system, selection, { timeoutMs: 90000 });
+    if (out) {
+      await pasteOrCopy(out);
+      addHistory({ text: out, raw: selection.slice(0, 2000), kind: "polish", preset: preset.name });
+    }
+  } catch (e) {
+    setError(`Falha no Polish: ${e.message}`);
+  } finally {
+    resetToIdle();
+    warmFormatting();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Meeting recorder: microphone + system audio, transcript and summary
+// ---------------------------------------------------------------------------
+
+let meetingProcs = [];
+let meetingFiles = [];
+let meetingTimer = null;
+
+function startMeeting() {
+  if (state.meeting.recording || state.meeting.processing) return;
+  if (state.model.state !== "ready") return setError("O modelo de voz ainda não está pronto.");
+  fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
+  const stamp = Date.now();
+  const sources = [settings.microphone || null];
+  if (settings.meetingSystemAudio) sources.push("@DEFAULT_MONITOR@");
+  meetingFiles = [];
+  meetingProcs = sources.map((device, i) => {
+    const file = path.join(TMP_DIR, `meeting-${stamp}-${i}.raw`);
+    meetingFiles.push(file);
+    const p = spawn("parecord", recordArgs(device, 100), { stdio: ["ignore", "pipe", "ignore"] });
+    p.stdout.pipe(fs.createWriteStream(file, { mode: 0o600 }));
+    p.on("error", (e) => setError(`Falha ao gravar a reunião: ${e.message}`));
+    return p;
+  });
+  state.meeting = { recording: true, startedAt: stamp, processing: false, progress: 0, step: null };
+  meetingTimer = setTimeout(stopMeeting, MAX_MEETING_MS);
+  broadcast();
+}
+
+async function stopMeeting() {
+  if (!state.meeting.recording) return;
+  clearTimeout(meetingTimer);
+  const startedAt = state.meeting.startedAt;
+  await Promise.all(
+    meetingProcs.map(
+      (p) =>
+        new Promise((resolve) => {
+          if (p.exitCode !== null) return resolve();
+          p.on("close", resolve);
+          p.kill("SIGTERM");
+        }),
+    ),
+  );
+  meetingProcs = [];
+  const files = meetingFiles.filter((f) => fs.existsSync(f) && fs.statSync(f).size > 0);
+  state.meeting = { recording: false, startedAt, processing: true, progress: 0, step: "transcribing" };
+  broadcast();
+  const when = new Date(startedAt).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  const meeting = { id: newId(), at: new Date(startedAt).toISOString(), durationMs: Date.now() - startedAt, title: `Reunião de ${when}`, transcript: "", summary: "" };
+  try {
+    if (!files.length) throw new Error("nenhum áudio gravado");
+    const result = await transcribe(files, {
+      progress: (p) => {
+        state.meeting.progress = p;
+        broadcast();
+      },
+    });
+    meeting.transcript = result.text;
+    if (meeting.transcript && aiReady()) {
+      Object.assign(state.meeting, { progress: 1, step: "summary" });
+      broadcast();
+      meeting.summary = await llm
+        .generate(settings.ai.model, llm.MEETING_SUMMARY, meeting.transcript.slice(0, 40000), { timeoutMs: 600000, numCtx: 16384 })
+        .catch(() => "");
+    }
+    meetings.unshift(meeting);
+    writeJson(FILES.meetings, meetings);
+    notify("Reunião transcrita", meeting.title);
+  } catch (e) {
+    setError(`Falha ao transcrever a reunião: ${e.message}`);
+  } finally {
+    for (const f of meetingFiles) fs.rm(f, { force: true }, () => {});
+    meetingFiles = [];
+    state.meeting = { recording: false, startedAt: 0, processing: false, progress: 0, step: null };
+    broadcast();
+    warmFormatting();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// System integration
+// ---------------------------------------------------------------------------
+
+function listMicrophones() {
+  return new Promise((resolve) => {
+    execFile("pactl", ["-f", "json", "list", "sources"], { timeout: 4000 }, (err, stdout) => {
+      if (err) return resolve([]);
+      try {
+        resolve(
+          JSON.parse(stdout)
+            .filter((s) => !s.name.endsWith(".monitor"))
+            .map((s) => ({ name: s.name, label: s.description || s.name })),
+        );
+      } catch {
+        resolve([]);
+      }
+    });
+  });
+}
+
+const AUTOSTART_FILE = path.join(os.homedir(), ".config", "autostart", "dronsioflow.desktop");
+
+function applyAutostart() {
+  if (settings.autostart) {
+    const launcher = process.env.DRONSIO_LAUNCHER || path.join(path.dirname(process.execPath), "dronsioflow.sh");
+    fs.mkdirSync(path.dirname(AUTOSTART_FILE), { recursive: true });
+    fs.writeFileSync(
+      AUTOSTART_FILE,
+      `[Desktop Entry]\nType=Application\nName=DronsioFlow\nExec=${launcher} --hidden\nIcon=dronsioflow\nX-GNOME-Autostart-enabled=true\n`,
+    );
+  } else {
+    fs.rmSync(AUTOSTART_FILE, { force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Windows
+// ---------------------------------------------------------------------------
+
+const ICON = path.join(__dirname, "assets", "icon.png");
+const WEB_PREFS = { preload: path.join(__dirname, "preload.js"), contextIsolation: true, sandbox: true };
+
+function createMainWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1180,
+    height: 820,
+    minWidth: 860,
+    minHeight: 600,
+    title: "DronsioFlow",
+    icon: ICON,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#1a1a1a" : "#f5f4f0",
+    webPreferences: WEB_PREFS,
+  });
+  mainWindow.removeMenu();
+  mainWindow.loadFile(path.join(__dirname, "ui", "index.html"));
+  mainWindow.once("ready-to-show", () => {
+    if (!process.argv.includes("--hidden")) mainWindow.show();
+  });
+  mainWindow.on("close", (e) => {
+    if (!quitting) {
+      e.preventDefault();
+      mainWindow.hide(); // dictation keeps running in the background
+    }
+  });
+  mainWindow.on("focus", () => refreshOllama());
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+}
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function createOverlayWindow() {
+  overlayWindow = new BrowserWindow({
+    width: 240,
+    height: 72,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    focusable: false, // on X11 this also keeps it above other windows, outside the WM
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    webPreferences: WEB_PREFS,
+  });
+  overlayWindow.setIgnoreMouseEvents(true);
+  overlayWindow.setAlwaysOnTop(true, "screen-saver");
+  overlayWindow.loadFile(path.join(__dirname, "ui", "overlay.html"));
+}
+
+let overlayPhase = null;
+
+function placeOverlay() {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const { x, y, width, height } = display.workArea;
+  const [w, h] = overlayWindow.getSize();
+  overlayWindow.setPosition(Math.round(x + (width - w) / 2), Math.round(y + height - h - 8));
+}
+
+/** The bar stays as a small idle pill (always visible, unobtrusive) and grows while recording. */
+function updateOverlay() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const visible = state.phase !== "idle" || state.meeting.recording || settings.showIdleBar;
+  if (!visible) {
+    if (overlayWindow.isVisible()) overlayWindow.hide();
+    overlayPhase = null;
+    return;
+  }
+  // follow the screen with the mouse pointer whenever a recording starts
+  if (!overlayWindow.isVisible() || (state.phase === "recording" && overlayPhase !== "recording")) placeOverlay();
+  if (!overlayWindow.isVisible()) overlayWindow.showInactive();
+  overlayPhase = state.phase;
+}
+
+function createTray() {
+  try {
+    tray = new Tray(nativeImage.createFromPath(ICON).resize({ width: 22, height: 22 }));
+    tray.setToolTip("DronsioFlow");
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: "Abrir DronsioFlow", click: showMainWindow },
+        { type: "separator" },
+        { label: "Sair", click: () => app.quit() },
+      ]),
+    );
+    tray.on("click", showMainWindow);
+  } catch {
+    tray = null; // no tray support on this desktop
+  }
+}
+
+// ---------------------------------------------------------------------------
+// IPC with the UI
+// ---------------------------------------------------------------------------
+
+ipcMain.handle("get-state", () => snapshot());
+
+ipcMain.handle("set-settings", (_e, patch) => {
+  const before = settings;
+  settings = mergeDefaults({ ...settings, ...patch });
+  saveSettings();
+  if (patch.model && patch.model !== before.model) loadModel();
+  if ("autostart" in patch) applyAutostart();
+  if ("theme" in patch) nativeTheme.themeSource = settings.theme;
+  if (patch.ai || patch.dictionary) warmFormatting();
+  broadcast();
+  return settings;
+});
+
+ipcMain.handle("reset-shortcuts", () => {
+  settings.shortcuts = { ...DEFAULT_SETTINGS.shortcuts };
+  saveSettings();
+  broadcast();
+});
+
+ipcMain.handle("clear-shortcut", (_e, name) => {
+  if (name.startsWith("polish:")) {
+    const preset = settings.polishPresets.find((p) => `polish:${p.id}` === name);
+    if (preset) preset.shortcut = [];
+  } else {
+    settings.shortcuts[name] = [];
+  }
+  saveSettings();
+  broadcast();
+});
+
+ipcMain.handle("capture-shortcut", (_e, name) => {
+  if (state.phase !== "idle") return;
+  state.capture = name;
+  captureKeys = new Set();
+  broadcast();
+});
+
+ipcMain.handle("cancel-capture", () => {
+  state.capture = null;
+  broadcast();
+});
+
+ipcMain.handle("copy", (_e, content) => clipboard.writeText(content));
+
+ipcMain.handle("delete-history", (_e, at) => {
+  history = at ? history.filter((h) => h.at !== at) : [];
+  writeJson(FILES.history, history);
+  broadcast();
+});
+
+ipcMain.handle("save-note", (_e, note) => {
+  let existing = note.id && notes.find((n) => n.id === note.id);
+  if (existing) {
+    if (existing.text === note.text) return existing.id;
+    Object.assign(existing, { text: note.text, updatedAt: new Date().toISOString() });
+  } else {
+    existing = { id: newId(), at: new Date().toISOString(), text: note.text || "" };
+    notes.unshift(existing);
+  }
+  writeJson(FILES.notes, notes);
+  broadcast();
+  return existing.id;
+});
+
+ipcMain.handle("delete-note", (_e, id) => {
+  notes = notes.filter((n) => n.id !== id);
+  writeJson(FILES.notes, notes);
+  broadcast();
+});
+
+ipcMain.handle("start-meeting", () => startMeeting());
+ipcMain.handle("stop-meeting", () => stopMeeting());
+ipcMain.handle("delete-meeting", (_e, id) => {
+  meetings = meetings.filter((m) => m.id !== id);
+  writeJson(FILES.meetings, meetings);
+  broadcast();
+});
+
+ipcMain.handle("list-microphones", listMicrophones);
+ipcMain.handle("refresh-ollama", () => refreshOllama());
+ipcMain.handle("retry-model", () => loadModel());
+ipcMain.handle("dismiss-error", () => setError(null));
+ipcMain.handle("open-folder", () => shell.openPath(DATA_DIR));
+ipcMain.handle("quit", () => app.quit());
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+let quitting = false;
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(signal, () => {
+    quitting = true;
+    app.quit();
+  });
+}
+
+app.on("second-instance", showMainWindow);
+app.on("before-quit", () => {
+  quitting = true;
+  recorder?.kill("SIGTERM");
+  for (const p of meetingProcs) p.kill("SIGTERM");
+  inputHelper?.send({ cmd: "quit" });
+  engine?.send({ cmd: "quit" });
+});
+app.on("window-all-closed", (e) => e.preventDefault());
+
+app.whenReady().then(async () => {
+  nativeTheme.themeSource = settings.theme;
+  createMainWindow();
+  createOverlayWindow();
+  createTray();
+  startInputHelper();
+  startEngine();
+  loadModel();
+  await refreshOllama();
+  warmFormatting();
+});

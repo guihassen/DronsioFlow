@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'" />
+    <title>DronsioFlow</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <header class="topbar">
+        <button class="icon-btn" id="toggle-sidebar" title="Recolher barra lateral"></button>
+        <div class="head-actions">
+          <button class="icon-btn" id="toggle-theme" title="Alternar tema"></button>
+          <button class="icon-btn" id="open-help" title="Atalhos e ajuda"></button>
+        </div>
+      </header>
+      <aside class="sidebar" id="sidebar"></aside>
+      <main class="panel" id="panel">
+        <div id="banner"></div>
+        <div id="view"></div>
+      </main>
+    </div>
+    <div id="modal-root"></div>
+    <div id="toast-root"></div>
+
+    <script src="keys.js"></script>
+    <script src="icons.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
