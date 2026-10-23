@@ -187,7 +187,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 
 | Aba | Opções |
 |---|---|
-| **Geral** | atalho de ditado, microfone, idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
+| **Geral** | atalho de ditado, microfone (**Automático**, padrão do sistema ou um específico, mostrando qual está em uso), idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
 | **Atalhos** | todos os atalhos (inclusive os de estilo), com remover e restaurar padrão. O app recusa um atalho que já está em uso e avisa quando a combinação também chega ao app em foco (como Ctrl+S), já que as teclas não são bloqueadas |
 | **Voz e modelo** | modelo do Whisper: Tiny (75 MB), Base (145 MB), Small (480 MB, recomendado), Medium (1,5 GB) ou Large v3 Turbo (1,6 GB), com progresso do download |
 | **IA** | liga/desliga a IA local e escolhe o modelo do Ollama |
@@ -213,6 +213,21 @@ Por isso a formatação com IA vem desligada: o ditado continua instantâneo, e 
 as transformações e os resumos. Para reduzir a espera, o app carrega o modelo enquanto você fala e usa instruções
 curtas. Ele também **não carrega a IA se isso for deixar menos de 1,5 GB de memória livre** e libera o modelo
 depois de 15 minutos sem uso.
+
+## Microfones e fones Bluetooth
+
+Fones Bluetooth (AirPods e similares) só têm microfone no modo "headset", de qualidade de ligação. Sempre que um
+app abre esse microfone — uma chamada no WhatsApp, o navegador, o DronsioFlow — o Linux alterna o fone entre o modo
+de música e o de headset, e é nessa troca que o link de voz costuma travar: o fone continua conectado, mas o
+microfone para de enviar áudio (por exemplo, logo depois de terminar uma ligação).
+
+Por isso o microfone padrão do DronsioFlow é **Automático**: cada ditado usa o melhor microfone com fio (USB, se
+houver, ou o do notebook). O fone fica no modo de música, com som melhor, e não entra em conflito com chamadas em
+outros apps. A escolha se atualiza sozinha quando você conecta ou desconecta dispositivos.
+
+Se você escolher o microfone do fone mesmo assim, o app grava em paralelo pelo microfone do notebook como
+**reserva**: se o Bluetooth não enviar áudio ou começar atrasado, a gravação usa a reserva e você não perde o
+ditado. Se nenhum microfone enviar áudio, um aviso explica o que fazer.
 
 ## Privacidade
 

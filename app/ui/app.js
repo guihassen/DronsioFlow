@@ -475,7 +475,9 @@ function settingsBody() {
   if (tab === "general") {
     return `<h2>Geral</h2><div class="group">
       <div class="item"><div><h4>Atalho de ditado</h4><p>Segure ${keysHtml(settings.shortcuts.pushToTalk, { soft: true })} e fale.</p></div><div class="control"><button class="btn secondary" data-act="capture" data-arg="pushToTalk">Alterar</button></div></div>
-      <div class="item"><div><h4>Microfone</h4><p>${esc(ui.mics?.find((m) => m.name === settings.microphone)?.label || (settings.microphone ? settings.microphone : "Padrão do sistema"))}</p></div><div class="control"><select class="select" data-select="microphone">${optionList([["", "Padrão do sistema"], ...(ui.mics || []).map((m) => [m.name, m.label])], settings.microphone)}</select></div></div>
+      <div class="item"><div><h4>Microfone</h4><p>Usando agora: <b>${esc(S.state.mic?.label || "Padrão do sistema")}</b>${S.state.mic?.bluetooth ? " (Bluetooth, com o microfone do notebook como reserva)" : ""}.</p>
+        <p style="margin-top:4px">O automático usa um microfone com fio (USB ou o do notebook) e deixa fones Bluetooth no modo de áudio de alta qualidade, sem conflito com chamadas.</p></div>
+        <div class="control"><select class="select" data-select="microphone">${optionList([["auto", "Automático (recomendado)"], ["", "Padrão do sistema"], ...(ui.mics || []).map((m) => [m.name, m.bus === "bluetooth" ? `${m.label} (Bluetooth)` : m.label])], settings.microphone)}</select></div></div>
       <div class="item"><div><h4>Idioma falado</h4><p>O idioma em que você dita.</p></div><div class="control"><select class="select" data-select="language">${optionList([["pt", "Português"], ["en", "Inglês"], ["es", "Espanhol"], ["fr", "Francês"], ["de", "Alemão"], ["it", "Italiano"], ["auto", "Detectar automaticamente"]], settings.language)}</select></div></div>
       <div class="item"><div><h4>Tema</h4></div><div class="control"><select class="select" data-select="theme">${optionList([["system", "Igual ao sistema"], ["light", "Claro"], ["dark", "Escuro"]], settings.theme)}</select></div></div>
     </div>`;

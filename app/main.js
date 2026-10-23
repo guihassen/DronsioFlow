@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS = {
   },
   model: "small",
   language: "pt",
-  microphone: "",
+  microphone: "auto", // "auto" | "" (system default) | a PipeWire source name
   dictionary: [], // { term, heardAs }
   snippets: [], // { id, trigger, text }
   pasteKeys: "shift+insert",
@@ -133,6 +133,7 @@ const state = {
   input: { keyboards: 0, uinput: false, running: false },
   ollama: { available: false, models: [] },
   meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
+  mic: { device: "", label: "Padrão do sistema", bluetooth: false }, // mic recordings use right now
   capture: null, // shortcut name being recorded from the keyboard
   lastError: null,
   flash: null, // short message shown on the floating bar (e.g. the new writing style)
@@ -550,8 +551,9 @@ function switchMode(mode, keys) {
 // Recording (PipeWire/PulseAudio via parecord, raw PCM on stdout)
 // ---------------------------------------------------------------------------
 
-let recorder = null;
-let chunks = [];
+let primary = null; // capture from the chosen microphone
+let backup = null; // parallel capture from a wired mic when the chosen one is Bluetooth
+let usedBackupNotice = false;
 let recordingStartedAt = 0;
 let maxTimer = null;
 let levelTimer = null;
@@ -577,20 +579,16 @@ function startRecording(mode, keys, locked) {
     showMainWindow();
     return;
   }
-  chunks = [];
   currentLevel = 0;
-  recorder = spawn("parecord", recordArgs(settings.microphone), { stdio: ["ignore", "pipe", "pipe"] });
-  recorder.stdout.on("data", (d) => {
-    chunks.push(d);
-    let peak = 0;
-    for (let i = 0; i + 1 < d.length; i += 2) peak = Math.max(peak, Math.abs(d.readInt16LE(i)));
-    currentLevel = Math.max(currentLevel * 0.6, Math.min(1, peak / 12000));
-  });
-  recorder.on("error", (e) => {
-    setError(`Falha ao gravar: ${e.message}`);
-    resetToIdle();
-  });
   recordingStartedAt = Date.now();
+  const mic = chooseMicrophone();
+  primary = spawnCapture(mic.device);
+  const fallback = mic.bluetooth ? bestWired() : null;
+  backup = fallback ? spawnCapture(fallback.name) : null;
+  primary.proc.on("error", (e) => {
+    setError(`Falha ao gravar: ${e.message}`);
+    cancelRecording();
+  });
   Object.assign(state, { phase: "recording", mode, locked, step: null, lastError: null });
   activeKeys = keys;
   lockChord = chord;
@@ -613,26 +611,67 @@ const NO_AUDIO_TIMEOUT_MS = 1500;
 let silenceTimer = null;
 
 function checkMicrophoneDelivers() {
-  if (state.phase !== "recording" || chunks.some((c) => c.length > 0)) return;
+  if (state.phase !== "recording" || primary?.bytes > 0) return;
+  if (backup?.bytes > 0) return flash("Usando o microfone do notebook");
   const message =
-    "O microfone não está enviando áudio. Se for um fone Bluetooth, desconecte e conecte de novo " +
-    "(ou troque o perfil dele para \"Headset\" nas configurações de som). Você também pode escolher outro " +
-    "microfone em Configurações → Geral.";
+    "O microfone não está enviando áudio. Se for um fone Bluetooth, desconecte e conecte de novo, ou use " +
+    "\"Automático\" em Configurações → Geral → Microfone para gravar pelo microfone do notebook.";
   setError(message);
   notify("Microfone sem áudio", message);
 }
 
-function endRecorder() {
+/** One parecord process; keeps its audio and a live level for the floating bar. */
+function spawnCapture(device, latencyMs = 20) {
+  const cap = { proc: null, chunks: [], bytes: 0, firstAt: 0 };
+  cap.proc = spawn("parecord", recordArgs(device, latencyMs), { stdio: ["ignore", "pipe", "ignore"] });
+  cap.proc.on("error", () => {});
+  cap.proc.stdout.on("data", (d) => {
+    if (!cap.bytes) cap.firstAt = Date.now();
+    cap.chunks.push(d);
+    cap.bytes += d.length;
+    // the bar follows the chosen mic, or the backup while the chosen one is silent
+    if (cap !== primary && primary?.bytes > 0) return;
+    let peak = 0;
+    for (let i = 0; i + 1 < d.length; i += 2) peak = Math.max(peak, Math.abs(d.readInt16LE(i)));
+    currentLevel = Math.max(currentLevel * 0.6, Math.min(1, peak / 12000));
+  });
+  return cap;
+}
+
+function stopCapture(cap) {
+  return new Promise((resolve) => {
+    if (!cap || cap.proc.exitCode !== null) return resolve();
+    cap.proc.on("exit", () => resolve());
+    setTimeout(() => cap.proc.kill("SIGTERM"), 120); // let parecord flush the last buffer
+  });
+}
+
+/** Stops both captures and returns the audio worth transcribing. */
+async function endRecorder() {
   clearTimeout(maxTimer);
   clearTimeout(silenceTimer);
   clearInterval(levelTimer);
-  const r = recorder;
-  recorder = null;
-  return new Promise((resolve) => {
-    if (!r || r.exitCode !== null) return resolve();
-    r.on("exit", () => resolve());
-    setTimeout(() => r.kill("SIGTERM"), 120); // let parecord flush the last buffer
-  });
+  const [p, b] = [primary, backup];
+  primary = backup = null;
+  await Promise.all([stopCapture(p), stopCapture(b)]);
+  if (!p) return Buffer.alloc(0);
+  // A Bluetooth mic that started late (mode switch) or delivered too little lost words: use the backup.
+  const expected = ((Date.now() - recordingStartedAt) / 1000) * SAMPLE_RATE * 2;
+  const primaryOk = p.bytes >= expected * 0.8 && p.firstAt - recordingStartedAt < 600;
+  const startMs = (cap) => (cap?.firstAt ? cap.firstAt - recordingStartedAt : -1);
+  console.log(
+    `[mic] esperado=${Math.round(expected)}B principal=${p.bytes}B (início +${startMs(p)}ms)` +
+      (b ? ` reserva=${b.bytes}B (início +${startMs(b)}ms)` : "") +
+      ` → ${b && !primaryOk && b.bytes > p.bytes * 0.8 ? "reserva" : "principal"}`,
+  );
+  if (b && !primaryOk && b.bytes > p.bytes * 0.8) {
+    if (!usedBackupNotice) {
+      usedBackupNotice = true;
+      notify("Microfone Bluetooth não respondeu", "Usei o microfone do notebook nesta gravação. Para evitar isso, escolha \"Automático\" em Configurações → Geral → Microfone.");
+    }
+    return Buffer.concat(b.chunks);
+  }
+  return Buffer.concat(p.chunks);
 }
 
 function resetToIdle() {
@@ -643,7 +682,6 @@ function resetToIdle() {
 
 async function cancelRecording() {
   await endRecorder();
-  chunks = [];
   resetToIdle();
 }
 
@@ -669,19 +707,15 @@ async function stopRecording() {
   if (state.phase !== "recording") return;
   const duration = Date.now() - recordingStartedAt;
   const mode = state.mode;
-  await endRecorder();
+  const recorded = await endRecorder();
   playSound("stop");
-  if (duration < MIN_RECORDING_MS) {
-    chunks = [];
-    return resetToIdle();
-  }
+  if (duration < MIN_RECORDING_MS) return resetToIdle();
   Object.assign(state, { phase: "processing", step: "transcribing" });
   broadcast();
   // DRONSIO_TEST_WAV replaces the microphone audio (16 kHz mono WAV) for testing.
   const pcm = process.env.DRONSIO_TEST_WAV
     ? fs.readFileSync(process.env.DRONSIO_TEST_WAV).subarray(44)
-    : Buffer.concat(chunks);
-  chunks = [];
+    : recorded;
   fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
   const file = path.join(TMP_DIR, `rec-${Date.now()}.wav`);
   fs.writeFileSync(file, wavFromPcm(pcm), { mode: 0o600 });
@@ -800,10 +834,10 @@ function startMeeting() {
   if (state.model.state !== "ready") return setError("O modelo de voz ainda não está pronto.");
   fs.mkdirSync(TMP_DIR, { recursive: true, mode: 0o700 });
   const stamp = Date.now();
-  const sources = [settings.microphone || null];
-  if (settings.meetingSystemAudio) sources.push("@DEFAULT_MONITOR@");
+  const devices = [chooseMicrophone().device || null];
+  if (settings.meetingSystemAudio) devices.push("@DEFAULT_MONITOR@");
   meetingFiles = [];
-  meetingProcs = sources.map((device, i) => {
+  meetingProcs = devices.map((device, i) => {
     const file = path.join(TMP_DIR, `meeting-${stamp}-${i}.raw`);
     meetingFiles.push(file);
     const p = spawn("parecord", recordArgs(device, 100), { stdio: ["ignore", "pipe", "ignore"] });
@@ -870,20 +904,81 @@ async function stopMeeting() {
 // System integration
 // ---------------------------------------------------------------------------
 
-function listMicrophones() {
-  return new Promise((resolve) => {
-    execFile("pactl", ["-f", "json", "list", "sources"], { timeout: 4000 }, (err, stdout) => {
-      if (err) return resolve([]);
-      try {
-        resolve(
-          JSON.parse(stdout)
-            .filter((s) => !s.name.endsWith(".monitor"))
-            .map((s) => ({ name: s.name, label: s.description || s.name })),
-        );
-      } catch {
-        resolve([]);
-      }
-    });
+// ---------------------------------------------------------------------------
+// Microphone choice
+// ---------------------------------------------------------------------------
+// Bluetooth headsets only have a mic in their low-quality "headset" mode, and every app that opens
+// that mic (a WhatsApp call, the browser, DronsioFlow) makes Linux switch the headset between its
+// music and headset modes. Those switches are where the voice link stalls. "auto" therefore prefers
+// a wired mic (USB, then the laptop's), leaving the headset in music mode for everyone else.
+
+const PACTL_ENV = { ...process.env, LC_ALL: "C" }; // stable, non-localized pactl output
+let sources = []; // [{ name, label, bus, available }]
+let defaultSource = "";
+let micWatcher = null;
+
+function pactl(args) {
+  return new Promise((resolve) =>
+    execFile("pactl", args, { timeout: 4000, env: PACTL_ENV }, (err, stdout) => resolve(err ? null : stdout)),
+  );
+}
+
+async function refreshSources() {
+  const [list, def] = await Promise.all([pactl(["-f", "json", "list", "sources"]), pactl(["get-default-source"])]);
+  try {
+    if (list) {
+      sources = JSON.parse(list)
+        .filter((s) => !s.name.endsWith(".monitor"))
+        .map((s) => ({
+          name: s.name,
+          label: s.description || s.name,
+          bus: s.properties?.["device.bus"] || "",
+          available: !(s.ports || []).length || s.ports.some((port) => port.availability !== "not available"),
+        }));
+    }
+  } catch {}
+  if (def) defaultSource = def.trim();
+  const before = JSON.stringify(state.mic);
+  state.mic = chooseMicrophone();
+  if (JSON.stringify(state.mic) !== before) broadcast();
+  return sources;
+}
+
+const wiredRank = (s) => (s.bus === "usb" ? 0 : /digital|internal|interno/i.test(s.label) ? 1 : 2);
+
+function bestWired() {
+  return sources.filter((s) => s.bus !== "bluetooth" && s.available).sort((a, b) => wiredRank(a) - wiredRank(b))[0] || null;
+}
+
+/** The mic a recording should use now: { device, label, bluetooth }. */
+function chooseMicrophone() {
+  const describe = (s) => ({ device: s.name, label: s.label, bluetooth: s.bus === "bluetooth" });
+  const pick = settings.microphone;
+  if (pick && pick !== "auto") {
+    const chosen = sources.find((s) => s.name === pick);
+    if (chosen) return describe(chosen);
+    // the chosen mic is gone (headset turned off): behave like "auto"
+  }
+  if (pick === "") {
+    const def = sources.find((s) => s.name === defaultSource);
+    return def ? { ...describe(def), device: "" } : { device: "", label: "Padrão do sistema", bluetooth: false };
+  }
+  const wired = bestWired();
+  return wired ? describe(wired) : { device: "", label: "Padrão do sistema", bluetooth: false };
+}
+
+/** Follows devices being plugged, connected or switched (pactl subscribe). */
+function watchMicrophones() {
+  micWatcher = spawn("pactl", ["subscribe"], { env: PACTL_ENV, stdio: ["ignore", "pipe", "ignore"] });
+  let timer = null;
+  micWatcher.stdout.on("data", (d) => {
+    if (!/on (source|card|server)/.test(d.toString())) return;
+    clearTimeout(timer);
+    timer = setTimeout(refreshSources, 300);
+  });
+  micWatcher.on("error", () => {});
+  micWatcher.on("exit", () => {
+    if (!quitting) setTimeout(watchMicrophones, 3000);
   });
 }
 
@@ -1021,6 +1116,7 @@ ipcMain.handle("set-settings", (_e, patch) => {
   if (patch.model && patch.model !== before.model) loadModel();
   if ("autostart" in patch) applyAutostart();
   if ("theme" in patch) nativeTheme.themeSource = settings.theme;
+  if ("microphone" in patch) state.mic = chooseMicrophone();
   if (patch.ai || patch.dictionary) warmFormatting();
   broadcast();
   return settings;
@@ -1091,7 +1187,7 @@ ipcMain.handle("delete-meeting", (_e, id) => {
   broadcast();
 });
 
-ipcMain.handle("list-microphones", listMicrophones);
+ipcMain.handle("list-microphones", async () => (await refreshSources()).map((s) => ({ name: s.name, label: s.label, bus: s.bus })));
 ipcMain.handle("refresh-ollama", () => refreshOllama());
 ipcMain.handle("retry-model", () => loadModel());
 ipcMain.handle("dismiss-error", () => setError(null));
@@ -1114,7 +1210,8 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 app.on("second-instance", showMainWindow);
 app.on("before-quit", () => {
   quitting = true;
-  recorder?.kill("SIGTERM");
+  for (const cap of [primary, backup]) cap?.proc.kill("SIGTERM");
+  micWatcher?.kill("SIGTERM");
   for (const p of meetingProcs) p.kill("SIGTERM");
   inputHelper?.send({ cmd: "quit" });
   engine?.send({ cmd: "quit" });
@@ -1128,6 +1225,8 @@ app.whenReady().then(async () => {
   createTray();
   startInputHelper();
   startEngine();
+  refreshSources();
+  watchMicrophones();
   loadModel();
   await refreshOllama();
   warmFormatting();
