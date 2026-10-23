@@ -187,7 +187,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 
 | Aba | Opções |
 |---|---|
-| **Geral** | atalho de ditado, microfone (**Automático**, padrão do sistema ou um específico, mostrando qual está em uso), idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
+| **Geral** | atalho de ditado, microfone (**Automático** com fio, **Automático preferindo fone Bluetooth**, padrão do sistema ou um específico, mostrando qual está em uso), idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
 | **Atalhos** | todos os atalhos (inclusive os de estilo), com remover e restaurar padrão. O app recusa um atalho que já está em uso e avisa quando a combinação também chega ao app em foco (como Ctrl+S), já que as teclas não são bloqueadas |
 | **Voz e modelo** | modelo do Whisper: Tiny (75 MB), Base (145 MB), Small (480 MB, recomendado), Medium (1,5 GB) ou Large v3 Turbo (1,6 GB), com progresso do download |
 | **IA** | liga/desliga a IA local e escolhe o modelo do Ollama |
@@ -225,7 +225,9 @@ Por isso o microfone padrão do DronsioFlow é **Automático**: cada ditado usa 
 houver, ou o do notebook). O fone fica no modo de música, com som melhor, e não entra em conflito com chamadas em
 outros apps. A escolha se atualiza sozinha quando você conecta ou desconecta dispositivos.
 
-Se você escolher o microfone do fone mesmo assim, o app grava em paralelo pelo microfone do notebook como
+Se você prefere o microfone do fone (ele fica perto da boca e capta menos ruído), escolha **Automático, preferindo
+fone Bluetooth**: com o fone conectado, o ditado usa o microfone dele; desconectado, usa o com fio. Nesse caso, e
+também se você escolher o microfone do fone diretamente, o app grava em paralelo pelo microfone do notebook como
 **reserva**: se o Bluetooth não enviar áudio ou começar atrasado, a gravação usa a reserva e você não perde o
 ditado. Se nenhum microfone enviar áudio, um aviso explica o que fazer.
 

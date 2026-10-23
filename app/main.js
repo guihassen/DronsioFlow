@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS = {
   },
   model: "small",
   language: "pt",
-  microphone: "auto", // "auto" | "" (system default) | a PipeWire source name
+  microphone: "auto", // "auto" | "bluetooth" (prefer a Bluetooth headset) | "" (system default) | a source name
   dictionary: [], // { term, heardAs }
   snippets: [], // { id, trigger, text }
   pasteKeys: "shift+insert",
@@ -954,7 +954,11 @@ function bestWired() {
 function chooseMicrophone() {
   const describe = (s) => ({ device: s.name, label: s.label, bluetooth: s.bus === "bluetooth" });
   const pick = settings.microphone;
-  if (pick && pick !== "auto") {
+  if (pick === "bluetooth") {
+    // headset mic when one is connected (a wired mic records in parallel as backup), else wired
+    const headset = sources.find((s) => s.bus === "bluetooth" && s.available);
+    if (headset) return describe(headset);
+  } else if (pick && pick !== "auto") {
     const chosen = sources.find((s) => s.name === pick);
     if (chosen) return describe(chosen);
     // the chosen mic is gone (headset turned off): behave like "auto"
