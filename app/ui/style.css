@@ -197,7 +197,7 @@ h1, h2, h3, p { margin: 0; }
 .row .kind.agent { color: #fff; background: var(--danger); }
 .group .item p.warn { color: var(--danger); margin-top: 6px; }
 .item code, .modal code { font: 13px ui-monospace, monospace; background: var(--lilac-soft); border-radius: 4px; padding: 0 4px; }
-.confirm-action { border: 2px solid var(--danger); border-radius: 12px; padding: 14px 16px; font-weight: 600; white-space: pre-wrap; word-break: break-word; margin-bottom: 12px; }
+.confirm-action { border: 2px solid var(--danger); border-radius: 12px; padding: 14px 16px; font: 13px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; max-height: 45vh; overflow: auto; margin-bottom: 12px; }
 .group-label { display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; letter-spacing: .06em; color: var(--text-2); text-transform: uppercase; margin: 8px 0 12px; }
 .group-label + .rows { margin-bottom: 28px; }
 .empty { text-align: center; color: var(--muted); padding: 48px 0; }

@@ -127,6 +127,14 @@ function mergeDefaults(saved) {
       .filter((e) => e.term);
   }
   delete merged.vocabulary;
+  // The agent shortcut came after people saved their own: it gets the default only if no other
+  // action (transforms included) already uses those keys; otherwise it starts without a shortcut.
+  if (saved.shortcuts && !("agent" in saved.shortcuts)) {
+    const keys = DEFAULT_SETTINGS.shortcuts.agent;
+    const same = (a) => a?.length === keys.length && a.every((k) => keys.includes(k));
+    const taken = Object.entries(merged.shortcuts).some(([name, k]) => name !== "agent" && same(k)) || (merged.polishPresets || []).some((p) => same(p.shortcut));
+    if (taken) merged.shortcuts = { ...merged.shortcuts, agent: [] };
+  }
   return merged;
 }
 
@@ -146,13 +154,15 @@ const state = {
   phase: "idle", // idle | recording | processing
   mode: null, // dictation | command | note | agent
   locked: false, // hands-free
-  step: null, // transcribing | formatting | agent (claude working) | confirm (waiting for the user)
+  step: null, // transcribing | formatting
   model: { name: settings.model, state: "idle", progress: 0, error: null },
   input: { keyboards: 0, uinput: false, running: false },
   ollama: { available: false, models: [] },
   meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
   mic: { device: "", label: "Padrão do sistema", bluetooth: false }, // mic recordings use right now
-  agent: { bin: null, action: null }, // claude binary found; action waiting for confirmation
+  // agent task, independent of the phase above: claude binary found, running, step running | confirm,
+  // action { title, detail } waiting for the user's confirmation
+  agent: { bin: null, running: false, step: null, action: null },
   capture: null, // shortcut name being recorded from the keyboard
   lastError: null,
   flash: null, // short message shown on the floating bar (e.g. the new writing style)
@@ -512,11 +522,14 @@ function onKeyDown(code) {
     }
     return;
   }
-  if (state.phase === "processing" && state.mode === "agent" && code === KEY.esc) return cancelAgent();
+  // Esc during a recording cancels the recording (above); otherwise it cancels the agent
+  if (code === KEY.esc && agentJob) return cancelAgent();
   if (state.phase !== "idle") return;
   const hit = allShortcuts().find((s) => matches(s.keys));
   if (!hit) return;
-  if (hit.name in RECORDING_ACTIONS) {
+  if (hit.name === "agent" && agentJob) {
+    agentBusy();
+  } else if (hit.name in RECORDING_ACTIONS) {
     startRecording(RECORDING_ACTIONS[hit.name], hit.keys, hit.name === "handsFree");
   } else if (hit.name === "pasteLast") {
     if (history[0]) pasteOrCopy(history[0].text);
@@ -591,6 +604,7 @@ function onKeyUp(code) {
 }
 
 function switchMode(mode, keys) {
+  if (mode === "agent" && agentJob) return agentBusy(); // keep recording in the current mode
   if (mode === "agent" && agentProblem()) {
     cancelRecording();
     return reportAgentProblem();
@@ -634,6 +648,7 @@ function startRecording(mode, keys, locked) {
     showMainWindow();
     return;
   }
+  if (mode === "agent" && agentJob) return agentBusy();
   if (mode === "agent" && agentProblem()) return reportAgentProblem();
   currentLevel = 0;
   recordingStartedAt = Date.now();
@@ -769,10 +784,14 @@ async function stopRecording() {
   const duration = Date.now() - recordingStartedAt;
   const mode = state.mode;
   // claimed before the first await, so Esc can cancel the task while it is still being transcribed
-  const job = mode === "agent" ? (agentJob = { cancelled: false, cancel: null, decide: null }) : null;
+  const job = mode === "agent" ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve() }) : null;
+  let agentStarted = false; // from then on the job outlives this recording
   const recorded = await endRecorder();
   playSound("stop");
-  if (duration < MIN_RECORDING_MS) return resetToIdle();
+  if (duration < MIN_RECORDING_MS) {
+    if (job && agentJob === job) agentJob = null;
+    return resetToIdle();
+  }
   Object.assign(state, { phase: "processing", step: "transcribing" });
   broadcast();
   logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`, startedInOwnWindow ? "from=own-window" : "");
@@ -793,14 +812,14 @@ async function stopRecording() {
     logStep(`transcribed ${raw.length} chars in ${((result.ms || 0) / 1000).toFixed(1)}s`);
     if (!raw) return;
     if (mode === "command") await handleCommand(raw, duration);
-    else if (mode === "agent") await handleAgent(raw, duration, job);
+    else if (mode === "agent") agentStarted = startAgent(raw, duration, job);
     else await handleDictation(raw, duration, result.ms, mode === "note", result.language);
   } catch (e) {
     logStep(`failed: ${e.message}`);
     setError(`Falha na transcrição: ${e.message}`);
   } finally {
     fs.rm(file, { force: true }, () => {});
-    if (job && agentJob === job) agentJob = null;
+    if (job && !agentStarted && agentJob === job) agentJob = null;
     resetToIdle();
   }
 }
@@ -884,7 +903,10 @@ async function handleCommand(instruction, durationMs) {
 // Agent mode: the spoken task goes to Claude Code (lib/agent.js), sensitive actions need a confirmation
 // ---------------------------------------------------------------------------
 
-let agentJob = null; // task in progress: { cancelled, cancel() of the running claude, decide(ok) while confirming }
+// Task in progress, at most one: { cancelled, cancel() and hold() of the running claude, decide(ok)
+// while a confirmation is open, confirmations (queue: one dialog at a time) }. It runs beside the
+// recording phases (state.agent), so dictation and the other shortcuts keep working meanwhile.
+let agentJob = null;
 
 function refreshAgentBin() {
   state.agent.bin = agent.findClaude(settings.agent.bin.trim());
@@ -907,31 +929,78 @@ function reportAgentProblem() {
   notify("Modo agente indisponível", problem);
 }
 
-function cancelAgent() {
+const agentBusy = () => flash("Agente já em execução · Esc cancela");
+
+function cancelAgent({ force = false } = {}) {
   if (!agentJob || agentJob.cancelled) return;
   logStep("agent cancel requested");
   agentJob.cancelled = true;
-  agentJob.cancel?.();
+  agentJob.cancel?.(force);
   agentJob.decide?.(false);
 }
 
-/** Brings the window up with Confirmar/Cancelar; resolves true only if the user confirmed. */
-function askConfirmation(job, action, timeoutMs) {
-  return new Promise((resolve) => {
-    const decide = (ok) => {
-      clearTimeout(timer);
-      job.decide = null;
-      state.agent.action = null;
-      resolve(ok);
-    };
-    const timer = setTimeout(() => decide(false), timeoutMs);
-    job.decide = decide;
-    state.step = "confirm";
-    state.agent.action = action;
+/**
+ * Shows Confirmar/Cancelar for `action` ({ title, detail }); resolves true only if the user confirmed.
+ * Cancel, the timeout, the agent being cancelled or `closed` settling (the hook gave up) all mean no.
+ * Waits for a dictation in progress to finish (and paste) before bringing the window up, so its
+ * paste never lands in the dialog. One dialog at a time: parallel tool calls queue up.
+ */
+function askConfirmation(job, action, closed) {
+  const ask = () =>
+    new Promise((resolve) => {
+      let done = false;
+      const decide = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        job.decide = null;
+        Object.assign(state.agent, { action: null, step: "running" });
+        broadcast();
+        resolve(ok);
+      };
+      const timer = setTimeout(() => decide(false), agent.CONFIRM_TIMEOUT_MS);
+      job.decide = decide;
+      closed?.then(() => decide(false));
+      if (job.cancelled) return decide(false);
+      (async () => {
+        while (!done && state.phase !== "idle") await new Promise((r) => setTimeout(r, 200));
+        if (done) return;
+        Object.assign(state.agent, { action: { ...action, id: newId() }, step: "confirm" });
+        broadcast();
+        showMainWindow();
+        notify("Agente: confirme a ação", `${action.title}\n${action.detail}`.slice(0, 300));
+      })();
+    });
+  const answer = job.confirmations.then(ask);
+  job.confirmations = answer;
+  return answer;
+}
+
+/** The PreToolUse hook's question: read-only calls pass, the rest waits for the user. */
+async function agentPermission(job, call, closed) {
+  if (job.cancelled) return false;
+  if (agent.toolPolicy(call.tool_name, call.tool_input) === "allow") return true;
+  logStep(`agent asks to use ${call.tool_name}`);
+  const release = job.hold?.(); // the user's time to decide doesn't count against the run's timeout
+  try {
+    const ok = (await askConfirmation(job, agent.describeToolCall(call.tool_name, call.tool_input), closed)) && !job.cancelled;
+    logStep(`agent ${call.tool_name} ${ok ? "confirmed" : "declined"}`);
+    return ok;
+  } finally {
+    release?.();
+  }
+}
+
+/** Starts the task in the background; the floating bar and the window follow state.agent. */
+function startAgent(instruction, durationMs, job) {
+  Object.assign(state.agent, { running: true, step: "running", action: null });
+  broadcast();
+  handleAgent(instruction, durationMs, job).finally(() => {
+    if (agentJob === job) agentJob = null;
+    Object.assign(state.agent, { running: false, step: null, action: null });
     broadcast();
-    showMainWindow();
-    notify("Agente: confirme a ação", action);
   });
+  return true;
 }
 
 async function handleAgent(instruction, durationMs, job) {
@@ -940,24 +1009,28 @@ async function handleAgent(instruction, durationMs, job) {
   const timeoutMs = Math.min(120, Math.max(1, Number(settings.agent.timeoutMin) || 10)) * 60000;
   const startedAt = Date.now();
   let sessionId = null;
+  let server = null;
   logStep(`agent start chars=${instruction.length} bin=${state.agent.bin}`);
   try {
+    server = await agent.permissionServer((call, closed) => agentPermission(job, call, closed));
     for (;;) {
-      state.step = "agent";
-      broadcast();
+      if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
       const turn = agent.run({
         bin: state.agent.bin,
         prompt: instruction,
         sessionId,
+        hookSocket: server.socketPath,
         timeoutMs,
         onEvent: (e) => {
           if (e.type === "system" && e.subtype === "init") logStep(`agent session ${e.session_id}`);
           for (const c of e.type === "assistant" ? e.message?.content || [] : []) if (c.type === "tool_use") logStep(`agent tool ${c.name}`);
         },
       });
-      job.cancel = turn.cancel;
+      Object.assign(job, { cancel: turn.cancel, hold: turn.hold });
       const out = await turn.promise;
-      job.cancel = null;
+      Object.assign(job, { cancel: null, hold: null });
+      // Esc right as claude exited: drop the answer, nothing more is confirmed or saved
+      if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
       sessionId = out.sessionId;
       if (out.isError) throw new Error(out.result || "o Claude Code devolveu um erro");
       const action = agent.confirmationRequest(out.result);
@@ -970,7 +1043,8 @@ async function handleAgent(instruction, durationMs, job) {
       }
       if (!sessionId) throw new Error("o Claude Code não informou a sessão para continuar");
       logStep("agent waiting for confirmation");
-      if (!(await askConfirmation(job, action, timeoutMs))) {
+      if (!(await askConfirmation(job, { title: "O agente pede para continuar", detail: action }))) {
+        if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
         logStep("agent action declined");
         notify("Agente", `Cancelado, nada foi feito: ${action}`.slice(0, 300));
         return;
@@ -985,6 +1059,8 @@ async function handleAgent(instruction, durationMs, job) {
     logStep(`agent failed: ${e.message}`);
     setError(`Falha no modo agente: ${e.message}`);
     notify("Falha no modo agente", e.message);
+  } finally {
+    server?.close();
   }
 }
 
@@ -1275,7 +1351,7 @@ function placeOverlay() {
 /** The bar stays as a small idle pill (always visible, unobtrusive) and grows while recording. */
 function updateOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const visible = state.phase !== "idle" || state.meeting.recording || settings.showIdleBar || Boolean(state.flash);
+  const visible = state.phase !== "idle" || state.agent.running || state.meeting.recording || settings.showIdleBar || Boolean(state.flash);
   if (!visible) {
     if (overlayWindow.isVisible()) overlayWindow.hide();
     overlayPhase = null;
@@ -1415,7 +1491,7 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 app.on("second-instance", showMainWindow);
 app.on("before-quit", () => {
   quitting = true;
-  cancelAgent();
+  cancelAgent({ force: true });
   for (const cap of [primary, backup]) cap?.proc.kill("SIGTERM");
   micWatcher?.kill("SIGTERM");
   for (const p of meetingProcs) p.kill("SIGTERM");
