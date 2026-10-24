@@ -123,10 +123,17 @@ laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a m
 
 ![Estilos](docs/screenshots/estilo.png)
 
-- Quatro estilos de escrita, com exemplos: **Natural**, **Formal**, **Casual** e **muito casual**.
+- Cinco estilos de escrita, com exemplos: **Natural**, **Formal**, **Casual**, **muito casual** e **Técnico**.
 - **Atalhos de estilo**: um atalho para cada estilo e um para **alternar** entre eles (Natural → Formal → Casual →
-  Muito casual), em qualquer app. A barra flutuante mostra o nome do novo estilo por um instante (e avisa se a
+  Muito casual → Técnico), em qualquer app. A barra flutuante mostra o nome do novo estilo por um instante (e avisa se a
   formatação com IA estiver desligada, já que sem ela o estilo não é aplicado).
+- **Técnico**: feito para ditar prompts e ordens a agentes de código como o Claude Code. Frases diretas e
+  imperativas, termos técnicos mantidos em inglês (commit, deploy, endpoint), nomes de produtos na grafia oficial,
+  números em algarismos e comandos e funções entre `crases`. Também orienta o Whisper com vocabulário de
+  desenvolvimento, para "Claude Code" não virar "cloud code".
+- **Menções com @** (estilo Técnico): arquivos e pastas citados viram menções do Claude Code. "Olha o arquivo main
+  ponto js" vira "Olhe o arquivo @main.js"; "a pasta src barra components" vira "a pasta @src/components/". As
+  menções são feitas por regras fixas, não pela IA, então só aparece o que você falou: nenhum caminho é inventado.
 - **Formatação com IA** (opcional): reescreve cada ditado no estilo escolhido. A IA nunca responde ao que você dita,
   só formata — dá para ditar prompts para outras IAs.
 - **Limpeza automática**: remover hesitações (sem IA), **autocorreções** ("às três, não, às quatro" vira "às

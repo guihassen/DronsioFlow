@@ -340,11 +340,12 @@ function pageSnippets() {
 }
 
 const STYLE_SHORTCUTS = [
-  ["cycleStyle", "Alternar estilo", "Passa para o próximo: Natural → Formal → Casual → Muito casual."],
+  ["cycleStyle", "Alternar estilo", "Passa para o próximo: Natural → Formal → Casual → Muito casual → Técnico."],
   ["style:natural", "Natural", "Muda direto para o estilo Natural."],
   ["style:formal", "Formal", "Muda direto para o estilo Formal."],
   ["style:casual", "Casual", "Muda direto para o estilo Casual."],
   ["style:veryCasual", "Muito casual", "Muda direto para o estilo Muito casual."],
+  ["style:technical", "Técnico", "Muda direto para o estilo Técnico."],
 ];
 
 function shortcutItem(name, title, desc, keys) {
@@ -357,6 +358,7 @@ const STYLES = [
   ["formal", "Formal.", "Profissional, frases completas", "Olá, tudo bem? Amanhã consigo lhe enviar o relatório."],
   ["casual", "Casual", "Amigável, como para um colega", "Oi, tudo bem? Amanhã te mando o relatório"],
   ["veryCasual", "muito casual", "Estilo chat, minúsculas", "oi tudo bem? amanhã te mando o relatório"],
+  ["technical", "Técnico.", "Para prompts e ordens a agentes de código, como o Claude Code", "Revise o @auth.js e corrija o bug do refresh token. Depois rode `npm test`."],
 ];
 
 function pageStyle() {

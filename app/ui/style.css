@@ -231,6 +231,7 @@ h1, h2, h3, p { margin: 0; }
 /* ---- style page ---------------------------------------------------------------- */
 .style-cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-bottom: 28px; }
 .style-card { text-align: left; background: var(--panel); border: 1.5px solid var(--line); border-radius: 14px; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+.style-card:last-child:nth-child(odd) { grid-column: span 2; }
 .style-card:hover { border-color: var(--faint); }
 .style-card.active { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
 .style-card h3 { font: 500 26px/1 var(--serif); }

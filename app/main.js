@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS = {
     "style:formal": [],
     "style:casual": [],
     "style:veryCasual": [],
+    "style:technical": [],
   },
   model: "small",
   language: "pt",
@@ -305,6 +306,12 @@ function onEngineMessage(msg) {
   }
 }
 
+function whisperPrompt() {
+  const terms = text.dictionaryTerms(settings.dictionary);
+  if (settings.ai.style === "technical") terms.push(...text.TECH_TERMS.filter((t) => !terms.includes(t)));
+  return terms.join(", ");
+}
+
 function transcribe(files, { task = "transcribe", progress } = {}) {
   return request(
     engine,
@@ -313,7 +320,7 @@ function transcribe(files, { task = "transcribe", progress } = {}) {
       paths: files,
       language: settings.language,
       task,
-      prompt: text.dictionaryTerms(settings.dictionary).join(", "),
+      prompt: whisperPrompt(),
       progress: Boolean(progress),
     },
     { onProgress: progress },
@@ -488,8 +495,8 @@ function onKeyDown(code) {
 // Writing styles: switch with a shortcut, confirm on the floating bar
 // ---------------------------------------------------------------------------
 
-const STYLE_ORDER = ["natural", "formal", "casual", "veryCasual"];
-const STYLE_NAMES = { natural: "Natural", formal: "Formal", casual: "Casual", veryCasual: "Muito casual" };
+const STYLE_ORDER = ["natural", "formal", "casual", "veryCasual", "technical"];
+const STYLE_NAMES = { natural: "Natural", formal: "Formal", casual: "Casual", veryCasual: "Muito casual", technical: "Técnico" };
 
 const SHORTCUT_NAMES = {
   pushToTalk: "Segurar para falar",
@@ -742,6 +749,8 @@ async function stopRecording() {
 async function formatDictation(raw, whisperLanguage) {
   let fixed = text.applyDictionary(raw, settings.dictionary);
   if (settings.ai.removeFillers) fixed = text.removeFillers(fixed); // instant, works without the LLM
+  const technical = settings.ai.style === "technical" && useLlmFormatting();
+  if (technical) fixed = text.spokenPaths(fixed);
   const snippet = text.exactSnippet(fixed, settings.snippets);
   if (snippet !== null) return snippet;
   let out = fixed;
@@ -763,6 +772,7 @@ async function formatDictation(raw, whisperLanguage) {
       setError(`IA indisponível, usei o texto sem formatação (${e.message}).`);
     }
   }
+  if (technical) out = text.fileMentions(out); // done here, not by the LLM, so paths are never invented
   return text.expandSnippets(out, settings.snippets);
 }
 

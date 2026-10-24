@@ -63,6 +63,46 @@ function dictionaryTerms(entries) {
   return (entries || []).map((e) => e.term).filter(Boolean);
 }
 
+// Whisper hint for the technical style: biases recognition toward dev vocabulary instead of
+// Portuguese look-alikes ("cloud code", "comitar"). Kept short; the hint shares Whisper's prompt window.
+const TECH_TERMS = [
+  "Claude Code", "prompt", "commit", "push", "pull request", "branch", "merge", "deploy", "build", "bug", "debug",
+  "refactor", "endpoint", "API", "frontend", "backend", "framework", "script", "npm", "Git", "GitHub", "Docker",
+  "JSON", "TypeScript", "JavaScript", "Python", "README", "log", "token", "cache", "query", "array", "string",
+];
+
+// ---- Claude Code file mentions (technical style) ----------------------------------------------
+
+const CODE_EXT = "js|jsx|ts|tsx|mjs|cjs|json|md|css|scss|html|py|rb|go|rs|java|kt|php|sh|yml|yaml|toml|lock|txt|sql|vue|svelte|xml|ini|env|c|h|cpp";
+// Names that look like files but are products ("Node.js"), left as they are.
+const NOT_FILES = new Set(["node.js", "next.js", "vue.js", "nuxt.js", "three.js", "express.js", "chart.js", "d3.js", "react.js", "angular.js"]);
+// Words that follow "pasta" without being its name ("a pasta raiz", "na pasta do projeto").
+const NOT_FOLDERS = new Set(["a", "o", "e", "de", "do", "da", "dos", "das", "em", "no", "na", "com", "que", "onde", "para", "pra", "raiz", "atual", "principal", "inteira", "toda", "certa", "nova", "correta", "dele", "dela", "desse", "dessa", "deste", "desta"]);
+
+const PATH_WORD = "[\\p{L}\\p{N}_-]+";
+
+/**
+ * Spoken paths into written ones, before the LLM sees them:
+ * "main ponto js" -> "main.js", "pasta app barra lib" -> "pasta app/lib".
+ */
+function spokenPaths(text) {
+  const spokenExt = CODE_EXT.split("|").filter((e) => e.length > 1).join("|"); // "ponto c" is too ambiguous
+  let out = text.replace(new RegExp(`(${PATH_WORD})\\s+ponto\\s+(jason|${spokenExt})${WORD_EDGE_END}`, "giu"), (_, name, ext) => `${name}.${/^jason$/i.test(ext) ? "json" : ext.toLowerCase()}`);
+  // only after a path noun: "a barra de navegação" stays as it is
+  const pathStart = `${WORD_EDGE_START}(?:pastas?|diret[óo]rios?|arquivos?|caminho)\\s+(?:(?:d?[oa]|em|no|na)\\s+)?`;
+  out = out.replace(new RegExp(`(${pathStart}${PATH_WORD})((?:\\s+barra\\s+[\\p{L}\\p{N}_.-]+)+)`, "giu"), (_, first, rest) => first + rest.replace(/\s+barra\s+/giu, "/"));
+  return out;
+}
+
+/** File names and named folders -> Claude Code @ mentions: "o arquivo main.js" -> "o arquivo @main.js". */
+function fileMentions(text) {
+  const file = new RegExp(`(?<![\\p{L}\\p{N}@/:._-])\`?((?:[\\p{L}\\p{N}_.-]+/)*[\\p{L}\\p{N}_-]*\\.(?:${CODE_EXT}))\`?${WORD_EDGE_END}`, "giu");
+  let out = text.replace(file, (m, path) => (NOT_FILES.has(path.toLowerCase()) ? m : `@${path}`));
+  const folder = new RegExp(`(${WORD_EDGE_START}(?:pastas?|diret[óo]rios?)\\s+)\`?((?:[\\p{L}\\p{N}_.-]+/)*[\\p{L}\\p{N}_.-]+)/?\`?${WORD_EDGE_END}(?!\\.\\p{L})`, "giu");
+  out = out.replace(folder, (m, lead, path) => (NOT_FOLDERS.has(path.toLowerCase()) ? m : `${lead}@${path}/`));
+  return out;
+}
+
 function countWords(text) {
   return text.split(/\s+/).filter(Boolean).length;
 }
@@ -101,4 +141,4 @@ function guessLanguage(text) {
   return null;
 }
 
-module.exports = { normalize, applyDictionary, exactSnippet, expandSnippets, dictionaryTerms, countWords, removeFillers, guessLanguage };
+module.exports = { normalize, applyDictionary, exactSnippet, expandSnippets, dictionaryTerms, TECH_TERMS, spokenPaths, fileMentions, countWords, removeFillers, guessLanguage };

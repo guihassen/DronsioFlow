@@ -6,6 +6,7 @@ const llm = require("../app/lib/llm.js");
 
 const terms = ["Claude Code", "Kubernetes"];
 const formatting = llm.formattingSystemPrompt({ style: "natural", terms, removeFillers: true, selfCorrections: true, lists: true });
+const technical = llm.formattingSystemPrompt({ style: "technical", terms, removeFillers: true, selfCorrections: true, lists: true });
 
 const LONG =
   "então eu queria que você revisasse o módulo de autenticação do projeto é hum principalmente a parte de refresh token " +
@@ -27,6 +28,8 @@ const CASES = [
     check: (o) => /[?,]/.test(o) && /amanhã/i.test(o) && o.length < 120 },
   { name: "ditado longo", sys: formatting, input: LONG,
     check: (o) => /dez minutos/i.test(o) && !/cinco minutos/i.test(o) && /refresh token/i.test(o) && o.length < LONG.length * 1.3 },
+  { name: "estilo técnico", sys: technical, input: "é hum roda o npm install e depois faz o commit e o deploy da branch main",
+    check: (o) => /`npm install`/.test(o) && /commit/i.test(o) && /deploy/i.test(o) && !/\bhum\b/i.test(o) },
   { name: "comando: traduzir seleção", sys: llm.COMMAND_WITH_SELECTION,
     input: "INSTRUÇÃO: traduz para inglês\n\nTEXTO SELECIONADO:\nObrigado pela reunião de hoje, mando o relatório amanhã.",
     check: (o) => /meeting/i.test(o) && /report/i.test(o) && !/reunião/i.test(o) },
@@ -43,7 +46,7 @@ async function run(model) {
     const t = Date.now();
     let out = "";
     try {
-      out = await llm.generate(model, c.sys, c.sys === formatting ? llm.formattingUserPrompt(c.input) : c.input, { timeoutMs: 300000 });
+      out = await llm.generate(model, c.sys, [formatting, technical].includes(c.sys) ? llm.formattingUserPrompt(c.input) : c.input, { timeoutMs: 300000 });
     } catch (e) {
       out = `ERRO: ${e.message}`;
     }
