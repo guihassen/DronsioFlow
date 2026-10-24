@@ -22,6 +22,7 @@ const FILES = {
   history: path.join(USER_DIR, "history.json"),
   notes: path.join(USER_DIR, "notes.json"),
   meetings: path.join(USER_DIR, "meetings.json"),
+  log: path.join(USER_DIR, "dictation.log"),
 };
 const TMP_DIR = path.join(os.tmpdir(), `dronsioflow-${process.getuid()}`);
 const SAMPLE_RATE = 16000;
@@ -93,6 +94,14 @@ function writeJson(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file + ".tmp", JSON.stringify(data, null, 2));
   fs.renameSync(file + ".tmp", file);
+}
+
+/** One line per pipeline step, so a dictation that didn't paste can be traced afterwards. */
+function logStep(...parts) {
+  try {
+    if (fs.statSync(FILES.log, { throwIfNoEntry: false })?.size > 512 * 1024) fs.renameSync(FILES.log, FILES.log + ".old");
+    fs.appendFileSync(FILES.log, `${new Date().toISOString()} ${parts.join(" ")}\n`);
+  } catch {}
 }
 
 function mergeDefaults(saved) {
@@ -342,7 +351,16 @@ function readSelection() {
 }
 
 async function pasteOrCopy(content) {
+  // Our own window has focus (e.g. opened while a long dictation was processing): Shift+Insert
+  // would land nowhere, so leave the text on the clipboard instead.
+  if (mainWindow?.isFocused()) {
+    clipboard.writeText(content);
+    logStep("paste skipped: DronsioFlow window focused");
+    notify("Texto copiado", "A janela do DronsioFlow estava em foco; cole com Ctrl+V onde quiser.");
+    return;
+  }
   const result = process.env.DRONSIO_TEST_NO_PASTE ? { ok: true } : await paste(content);
+  logStep(`paste ok=${result.ok}`, result.reason ? `reason=${result.reason}` : "", `chars=${content.length}`);
   if (!result.ok) {
     clipboard.writeText(content);
     setError("Não consegui colar automaticamente; o texto está na área de transferência.");
@@ -723,6 +741,7 @@ async function stopRecording() {
   if (duration < MIN_RECORDING_MS) return resetToIdle();
   Object.assign(state, { phase: "processing", step: "transcribing" });
   broadcast();
+  logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`);
   // DRONSIO_TEST_WAV replaces the microphone audio (16 kHz mono WAV) for testing.
   const pcm = process.env.DRONSIO_TEST_WAV
     ? fs.readFileSync(process.env.DRONSIO_TEST_WAV).subarray(44)
@@ -735,10 +754,12 @@ async function stopRecording() {
     const task = mode === "dictation" && settings.ai.translateTo === "en" && !useLlmFormatting() ? "translate" : "transcribe";
     const result = await transcribe([file], { task });
     const raw = result.text.trim();
+    logStep(`transcribed ${raw.length} chars in ${((result.ms || 0) / 1000).toFixed(1)}s`);
     if (!raw) return;
     if (mode === "command") await handleCommand(raw, duration);
     else await handleDictation(raw, duration, result.ms, mode === "note", result.language);
   } catch (e) {
+    logStep(`failed: ${e.message}`);
     setError(`Falha na transcrição: ${e.message}`);
   } finally {
     fs.rm(file, { force: true }, () => {});
@@ -760,15 +781,18 @@ async function formatDictation(raw, whisperLanguage) {
     try {
       // What the user actually spoke: the words themselves when clear, else Whisper's detection.
       const spoken = text.guessLanguage(fixed) || whisperLanguage || expectedLanguage();
+      const t = Date.now();
       const rewritten = await llm.generate(settings.ai.model, formattingPrompt(spoken), llm.formattingUserPrompt(fixed, spoken), { timeoutMs: 60000 });
+      logStep(`formatted in ${((Date.now() - t) / 1000).toFixed(1)}s`);
       const outLanguage = rewritten && text.guessLanguage(rewritten);
       if (!settings.ai.translateTo && outLanguage && outLanguage !== spoken && ["pt", "en"].includes(spoken)) {
         // Safety net: the model translated without being asked; keep the user's own words.
-        console.log(`[format] IA respondeu em ${outLanguage} para um ditado em ${spoken}; usando o texto do Whisper`);
+        logStep(`formatting discarded: IA respondeu em ${outLanguage} para um ditado em ${spoken}`);
       } else {
         out = rewritten || fixed;
       }
     } catch (e) {
+      logStep(`formatting failed: ${e.message}`);
       setError(`IA indisponível, usei o texto sem formatação (${e.message}).`);
     }
   }

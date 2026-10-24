@@ -14,7 +14,7 @@ const STYLES = {
   casual: "Tom casual e amigável.",
   veryCasual: "Tom de chat: minúsculas, sem ponto final.",
   technical:
-    "Tom técnico, direto e imperativo, como um pedido a um agente de código. " +
+    "Tom técnico, como uma ordem a um agente de código: verbos no imperativo (Olhe, Rode, Revise). " +
     "Termos técnicos em inglês ficam em inglês (commit, pull request, deploy); nomes de produtos com a grafia oficial (TypeScript, React, Claude Code). " +
     "Crases só em comandos e nomes de funções (`npm test`, `parseConfig`); números em algarismos.",
 };
