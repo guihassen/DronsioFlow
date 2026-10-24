@@ -350,9 +350,19 @@ function readSelection() {
     .catch(() => "");
 }
 
-async function pasteOrCopy(content) {
-  // Our own window has focus (e.g. opened while a long dictation was processing): Shift+Insert
-  // would land nowhere, so leave the text on the clipboard instead.
+/**
+ * `returnFocus`: the action started in another app. If our window took the focus since then (opened
+ * to check on a long dictation), minimizing it hands the focus back to that app, so the paste lands there.
+ */
+async function pasteOrCopy(content, { returnFocus = false } = {}) {
+  if (returnFocus && mainWindow?.isFocused()) {
+    logStep("window focused during processing: minimizing to return focus");
+    mainWindow.minimize();
+    for (let i = 0; i < 20 && mainWindow.isFocused(); i++) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100)); // let the other app settle its keyboard focus
+  }
+  // Our own window has focus (the action started here): Shift+Insert would land nowhere,
+  // so leave the text on the clipboard instead.
   if (mainWindow?.isFocused()) {
     clipboard.writeText(content);
     logStep("paste skipped: DronsioFlow window focused");
@@ -584,6 +594,7 @@ let primary = null; // capture from the chosen microphone
 let backup = null; // parallel capture from a wired mic when the chosen one is Bluetooth
 let usedBackupNotice = false;
 let recordingStartedAt = 0;
+let startedInOwnWindow = false; // our window had the focus when the recording started
 let maxTimer = null;
 let levelTimer = null;
 let currentLevel = 0;
@@ -610,6 +621,7 @@ function startRecording(mode, keys, locked) {
   }
   currentLevel = 0;
   recordingStartedAt = Date.now();
+  startedInOwnWindow = Boolean(mainWindow?.isFocused());
   const mic = chooseMicrophone();
   primary = spawnCapture(mic.device);
   const fallback = mic.bluetooth ? bestWired() : null;
@@ -734,6 +746,9 @@ function wavFromPcm(pcm) {
 
 async function stopRecording() {
   if (state.phase !== "recording") return;
+  // Releasing Ctrl and Super fires two key-ups; leave "recording" before awaiting, or both stop it
+  // and the second, empty run resets the bar to idle while the real dictation is still processing.
+  state.phase = "processing";
   const duration = Date.now() - recordingStartedAt;
   const mode = state.mode;
   const recorded = await endRecorder();
@@ -741,7 +756,7 @@ async function stopRecording() {
   if (duration < MIN_RECORDING_MS) return resetToIdle();
   Object.assign(state, { phase: "processing", step: "transcribing" });
   broadcast();
-  logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`);
+  logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`, startedInOwnWindow ? "from=own-window" : "");
   // DRONSIO_TEST_WAV replaces the microphone audio (16 kHz mono WAV) for testing.
   const pcm = process.env.DRONSIO_TEST_WAV
     ? fs.readFileSync(process.env.DRONSIO_TEST_WAV).subarray(44)
@@ -814,7 +829,7 @@ async function handleDictation(raw, durationMs, processingMs, asNote, language) 
     writeJson(FILES.notes, notes);
     notify("Nota salva", final.slice(0, 120));
   } else {
-    await pasteOrCopy(final);
+    await pasteOrCopy(final, { returnFocus: !startedInOwnWindow });
   }
   addHistory({ text: final, raw, durationMs, processingMs, kind: asNote ? "note" : "dictation" });
 }
@@ -833,7 +848,7 @@ async function handleCommand(instruction, durationMs) {
       ? await llm.generate(settings.ai.model, llm.COMMAND_WITH_SELECTION, `INSTRUÇÃO: ${instruction}\n\nTEXTO SELECIONADO:\n${selection}`, { timeoutMs: 90000 })
       : await llm.generate(settings.ai.model, llm.COMMAND_WITHOUT_SELECTION, instruction, { timeoutMs: 90000 });
     if (!out) return;
-    await pasteOrCopy(out);
+    await pasteOrCopy(out, { returnFocus: !startedInOwnWindow });
     addHistory({ text: out, raw: instruction, durationMs, kind: "command", selection: selection.slice(0, 2000) });
   } catch (e) {
     setError(`Falha no modo comando: ${e.message}`);
@@ -846,6 +861,7 @@ async function runPolish(presetId) {
   const preset = settings.polishPresets.find((p) => p.id === presetId);
   if (!preset) return;
   if (!aiReady()) return setError("O Polish precisa da IA (Ollama). Ative em Estilo e IA.");
+  const fromOwnWindow = Boolean(mainWindow?.isFocused());
   const selection = await readSelection();
   if (!selection.trim()) {
     notify("Polish", "Selecione um texto antes de usar o atalho.");
@@ -857,7 +873,7 @@ async function runPolish(presetId) {
     const system = `${preset.prompt}\nDevolva somente o texto reescrito, sem aspas e sem explicações.`;
     const out = await llm.generate(settings.ai.model, system, selection, { timeoutMs: 90000 });
     if (out) {
-      await pasteOrCopy(out);
+      await pasteOrCopy(out, { returnFocus: !fromOwnWindow });
       addHistory({ text: out, raw: selection.slice(0, 2000), kind: "polish", preset: preset.name });
     }
   } catch (e) {
