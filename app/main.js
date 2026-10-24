@@ -747,10 +747,15 @@ async function endRecorder() {
   return Buffer.concat(p.chunks);
 }
 
+let idleWaiters = []; // resolved when the recording or processing in progress is over
+
+const whenIdle = () => (state.phase === "idle" ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve)));
+
 function resetToIdle() {
   Object.assign(state, { phase: "idle", mode: null, locked: false, step: null });
   activeKeys = [];
   broadcast();
+  for (const resolve of idleWaiters.splice(0)) resolve();
 }
 
 async function cancelRecording() {
@@ -963,7 +968,7 @@ function askConfirmation(job, action, closed) {
       closed?.then(() => decide(false));
       if (job.cancelled) return decide(false);
       (async () => {
-        while (!done && state.phase !== "idle") await new Promise((r) => setTimeout(r, 200));
+        while (!done && state.phase !== "idle") await whenIdle();
         if (done) return;
         Object.assign(state.agent, { action: { ...action, id: newId() }, step: "confirm" });
         broadcast();
@@ -979,7 +984,12 @@ function askConfirmation(job, action, closed) {
 /** The PreToolUse hook's question: read-only calls pass, the rest waits for the user. */
 async function agentPermission(job, call, closed) {
   if (job.cancelled) return false;
-  if (agent.toolPolicy(call.tool_name, call.tool_input) === "allow") return true;
+  const policy = agent.toolPolicy(call.tool_name, call.tool_input);
+  if (policy === "allow") return true;
+  if (policy === "deny") {
+    logStep(`agent ${call.tool_name} refused: sensitive path`);
+    return false;
+  }
   logStep(`agent asks to use ${call.tool_name}`);
   const release = job.hold?.(); // the user's time to decide doesn't count against the run's timeout
   try {
@@ -1457,7 +1467,10 @@ ipcMain.handle("delete-note", (_e, id) => {
   broadcast();
 });
 
-ipcMain.handle("agent-confirm", (_e, ok) => agentJob?.decide?.(Boolean(ok)));
+// Only the dialog on screen can be answered: a late click or Esc meant for an earlier one is ignored.
+ipcMain.handle("agent-confirm", (_e, id, ok) => {
+  if (state.agent.step === "confirm" && id && state.agent.action?.id === id) agentJob?.decide?.(ok === true);
+});
 ipcMain.handle("cancel-agent", () => cancelAgent());
 
 ipcMain.handle("start-meeting", () => startMeeting());
@@ -1503,6 +1516,7 @@ app.on("window-all-closed", (e) => e.preventDefault());
 app.whenReady().then(async () => {
   nativeTheme.themeSource = settings.theme;
   refreshAgentBin();
+  agent.cleanStaleDirs();
   createMainWindow();
   createOverlayWindow();
   createTray();

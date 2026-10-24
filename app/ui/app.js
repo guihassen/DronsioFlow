@@ -561,7 +561,7 @@ function renderModal() {
     html = `<div class="modal confirm"><h2>Confirmar ação do agente</h2><p class="lead">${esc(action.title)}:</p>
       <div class="confirm-action">${esc(action.detail)}</div>
       <p class="muted">Confira os detalhes antes de confirmar. Se cancelar, nada é executado.</p>
-      <div class="foot"><button class="btn secondary" data-act="agent-confirm" data-arg="0">Cancelar</button><button class="btn danger" data-act="agent-confirm" data-arg="1">Confirmar</button></div></div>`;
+      <div class="foot"><button class="btn secondary" data-act="agent-confirm" data-arg="${esc(action.id)}:0">Cancelar</button><button class="btn danger" data-act="agent-confirm" data-arg="${esc(action.id)}:1">Confirmar</button></div></div>`;
   } else if (capture) {
     const name = capture.startsWith("polish:")
       ? S.settings.polishPresets.find((p) => `polish:${p.id}` === capture)?.name || "Transformação"
@@ -753,7 +753,11 @@ const ACTIONS = {
     api.deleteNote(id);
   },
   // a click meant for the previous dialog must not confirm the next one that just replaced it
-  "agent-confirm": (ok) => (ok !== "1" || Date.now() - ui.confirmShownAt > 600) && api.agentConfirm(ok === "1"),
+  // the answer carries the id of the dialog it belongs to, so the main process can drop a stale one
+  "agent-confirm": (arg) => {
+    const [id, ok] = arg.split(":");
+    if (ok !== "1" || Date.now() - ui.confirmShownAt > 600) api.agentConfirm(id, ok === "1");
+  },
   "refresh-ollama": () => api.refreshOllama(),
   "open-folder": () => api.openFolder(),
   quit: () => api.quit(),
@@ -826,7 +830,7 @@ document.addEventListener("submit", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && S.state.agent.step === "confirm") api.agentConfirm(false);
+  if (ev.key === "Escape" && S.state.agent.step === "confirm") api.agentConfirm(ui.confirmId, false);
   else if (ev.key === "Escape" && ui.modal && !S.state.capture) ACTIONS["close-modal"]();
 });
 

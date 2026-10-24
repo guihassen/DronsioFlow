@@ -16,24 +16,41 @@ Não execute a ação nessa resposta. Só prossiga quando o usuário responder "
 Ao terminar, responda em português do Brasil, de forma curta (uma ou duas frases): o que foi feito ou o que você encontrou. Se não conseguir, diga o motivo em uma frase.`;
 
 // Headless runs can't answer permission prompts: `-p` denies whatever is not pre-approved. So:
-// - only read-only tools are pre-approved (--allowedTools);
-// - tools that change something (shell, file edits, clicking, typing or running scripts in Chrome) go
-//   through a PreToolUse hook (native/agent_hook.js) that asks the app, which shows the real call to
-//   the user and answers allow or deny. They are not pre-approved, so if the hook fails they stay denied;
+// - a PreToolUse hook (native/agent_hook.js) sees EVERY tool call and asks the app (toolPolicy):
+//   reading passes, sensitive files are refused, and anything else, unknown tools included, waits
+//   for the user, who sees the real call. If the hook fails, only the read-only tools in
+//   --allowedTools can run; everything else stays denied;
+// - --disallowedTools removes, as a second layer, tools that act outside this computer or this task
+//   (messages to other sessions, remote triggers, schedules, worktrees, skills, the claude.ai account
+//   connectors) and reading sensitive files;
 // - --setting-sources "" ignores ~/.claude/settings.json and project settings, so the user's own
 //   permissions.allow or defaultMode can't widen this. Login lives in ~/.claude.json and the
 //   credentials file, not in settings, so the account keeps working;
 // - never --dangerously-skip-permissions.
 const CHROME = "mcp__claude-in-chrome__";
-const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "WebSearch", "WebFetch"];
+const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "WebSearch"];
+// the agent's own bookkeeping; subagents (Task/Agent) go through the same hook for each of their calls
+const AGENT_TOOLS = ["Task", "Agent", "ToolSearch", "TodoWrite", "TaskStop"];
 const READ_ONLY_CHROME = [
   "read_page", "get_page_text", "find", "navigate", "tabs_context_mcp", "tabs_create_mcp", "list_connected_browsers",
   "select_browser", "switch_browser", "read_console_messages", "read_network_requests", "shortcuts_list", "resize_window",
 ];
 // `computer` both looks (screenshot, zoom) and acts (click, type, key…): only looking skips the confirmation.
 const READ_ONLY_COMPUTER = ["screenshot", "zoom"];
-// Every Chrome tool goes through the hook, so a new one is confirmed until it is known to only read.
-const HOOK_MATCHER = `^(Bash|Write|Edit|MultiEdit|NotebookEdit|${CHROME}.*)$`;
+const DISALLOWED_TOOLS = [
+  "SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
+  "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_Claude_Docs",
+];
+// Never read, not even with confirmation: keys, tokens, browser profiles, the app's and Claude's own data.
+const SENSITIVE_DIRS = [".ssh", ".gnupg", ".claude", ".config", ".local/share/keyrings", ".mozilla"];
+const SENSITIVE_FILES = [".claude.json"];
+const SENSITIVE_NAME = /^(\.env.*|.*\.pem|.*\.key|id_rsa.*|id_ed25519.*|\.claude\.json.*)$/;
+const DISALLOWED_READS = [
+  ...SENSITIVE_DIRS.map((d) => `Read(~/${d}/**)`),
+  ...SENSITIVE_FILES.map((f) => `Read(~/${f})`),
+  "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/id_rsa*)", "Read(**/id_ed25519*)",
+];
+const HOOK_MATCHER = "*"; // every tool
 const HOOK_SCRIPT = path.join(__dirname, "..", "native", "agent_hook.js");
 const CONFIRM_TIMEOUT_MS = 5 * 60 * 1000; // the user's answer to one confirmation
 const HOOK_TIMEOUT_S = CONFIRM_TIMEOUT_MS / 1000 + 60; // longer, so the dialog's timeout always wins
@@ -42,11 +59,69 @@ const PERMISSION_ARGS = [
   "--permission-mode", "default",
   "--setting-sources", "",
   "--allowedTools", [...READ_ONLY_TOOLS, ...READ_ONLY_CHROME.map((t) => CHROME + t)].join(","),
+  "--disallowedTools", [...DISALLOWED_TOOLS, ...DISALLOWED_READS].join(","),
 ];
 
-/** "allow" for calls that only read, "confirm" for everything the hook sends that changes something. */
-function toolPolicy(name, input) {
-  if (READ_ONLY_TOOLS.includes(name)) return "allow";
+/** Absolute path with ~ expanded and symlinks resolved as far as the path exists. */
+function realPath(p, cwd) {
+  let abs = path.resolve(cwd, String(p).replace(/^~(?=$|\/)/, os.homedir()));
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync.native(abs), ...rest.reverse());
+    } catch {
+      const parent = path.dirname(abs);
+      if (parent === abs) return path.join(abs, ...rest.reverse());
+      rest.push(path.basename(abs));
+      abs = parent;
+    }
+  }
+}
+
+const inside = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+
+/** "deny" for a sensitive file or anything inside a sensitive folder, "contains" when one is below p. */
+function sensitivity(p, cwd) {
+  const home = os.homedir();
+  const lexical = path.resolve(cwd, String(p).replace(/^~(?=$|\/)/, home));
+  const dirs = SENSITIVE_DIRS.map((d) => path.join(home, d));
+  const files = SENSITIVE_FILES.map((f) => path.join(home, f));
+  const targets = [...dirs, ...files];
+  for (const t of [...targets]) targets.push(realPath(t, cwd)); // ~/.config may itself be a link
+  for (const candidate of new Set([lexical, realPath(p, cwd)])) {
+    if (SENSITIVE_NAME.test(path.basename(candidate))) return "deny";
+    if (targets.some((t) => inside(candidate, t))) return "deny";
+    if (targets.some((t) => inside(t, candidate))) return "contains";
+  }
+  return null;
+}
+
+/** Folder a Glob/Grep searches: its path, else the fixed start of an absolute pattern, else cwd. */
+function searchRoot(name, input) {
+  if (input?.path) return input.path;
+  const pattern = name === "Glob" ? input?.pattern : input?.glob;
+  if (typeof pattern === "string" && /^[/~]/.test(pattern)) {
+    const fixed = pattern.split("/").findIndex((part) => /[*?[{]/.test(part));
+    return fixed < 0 ? pattern : pattern.split("/").slice(0, fixed).join("/") || "/";
+  }
+  return null;
+}
+
+/**
+ * The app's answer to a tool call: "allow" (reads, the agent's own bookkeeping), "deny" (reading
+ * sensitive files: refused without asking) or "confirm" (everything else, unknown tools included).
+ */
+function toolPolicy(name, input, { cwd = os.homedir() } = {}) {
+  if (name === "Read") {
+    if (typeof input?.file_path !== "string") return "confirm";
+    return sensitivity(input.file_path, cwd) === "deny" ? "deny" : "allow";
+  }
+  if (name === "Glob" || name === "Grep") {
+    const s = sensitivity(searchRoot(name, input) ?? cwd, cwd);
+    // a search over a folder that holds sensitive ones (e.g. the whole home) is shown first
+    return s === "deny" ? "deny" : s === "contains" ? "confirm" : "allow";
+  }
+  if (READ_ONLY_TOOLS.includes(name) || AGENT_TOOLS.includes(name)) return "allow";
   if (name.startsWith(CHROME)) {
     const tool = name.slice(CHROME.length);
     if (READ_ONLY_CHROME.includes(tool)) return "allow";
@@ -89,6 +164,8 @@ function describeToolCall(name, input = {}) {
         title: "Editar um arquivo",
         detail: `${input.file_path}\n\n${clip((input.edits || []).map((e) => `Trocar:\n${e.old_string}\nPor:\n${e.new_string}`).join("\n\n"), 1500)}`,
       };
+    case "WebFetch":
+      return { title: "Buscar uma página da web", detail: `${input.url}\n\nPara: ${clip(input.prompt, 1000)}` };
     case "NotebookEdit":
       return { title: "Editar um notebook", detail: `${input.notebook_path} (${input.edit_mode || "replace"})\n\n${clip(input.new_source, 1500)}` };
     case "chrome:computer":
@@ -113,13 +190,30 @@ function hookSettings(socketPath) {
   return JSON.stringify({ hooks: { PreToolUse: [{ matcher: HOOK_MATCHER, hooks: [{ type: "command", command, timeout: HOOK_TIMEOUT_S }] }] } });
 }
 
+const TMP_PREFIX = "dronsio-agent-";
+
+/** Removes this user's socket folders older than a day, left behind if the app was killed. */
+function cleanStaleDirs(maxAgeMs = 24 * 60 * 60 * 1000) {
+  let names = [];
+  try {
+    names = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(TMP_PREFIX));
+  } catch {}
+  for (const name of names) {
+    const dir = path.join(os.tmpdir(), name);
+    try {
+      const st = fs.lstatSync(dir);
+      if (st.isDirectory() && st.uid === process.getuid() && Date.now() - st.mtimeMs > maxAgeMs) fs.rmSync(dir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 /**
  * Unix socket the hook asks, in a private temporary directory (0700, socket 0600).
  * onRequest({ tool_name, tool_input }, closed) resolves true to allow; `closed` settles when the hook
  * hung up (Claude Code killed it), so a pending dialog can be dropped. Returns { socketPath, close }.
  */
 async function permissionServer(onRequest) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dronsio-agent-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX));
   const socketPath = path.join(dir, "hook.sock");
   const server = net.createServer((conn) => {
     let buf = "";
@@ -311,6 +405,7 @@ module.exports = {
   confirmationRequest,
   toolPolicy,
   describeToolCall,
+  cleanStaleDirs,
   permissionServer,
   run,
 };

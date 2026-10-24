@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 const agent = createRequire(import.meta.url)("../app/lib/agent.js");
@@ -46,13 +46,14 @@ test("args: only read-only tools pre-approved, user settings ignored, hook insta
   assert.equal(a[a.indexOf("--permission-mode") + 1], "default");
   assert.equal(a[a.indexOf("--setting-sources") + 1], "");
   const allowed = a[a.indexOf("--allowedTools") + 1].split(",");
-  for (const t of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "mcp__claude-in-chrome", "mcp__claude-in-chrome__computer", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool"])
+  for (const t of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "mcp__claude-in-chrome", "mcp__claude-in-chrome__computer", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool"])
     assert(!allowed.includes(t), t);
-  for (const t of ["Read", "Grep", "WebFetch", "mcp__claude-in-chrome__read_page", "mcp__claude-in-chrome__navigate"]) assert(allowed.includes(t), t);
+  for (const t of ["Read", "Grep", "mcp__claude-in-chrome__read_page", "mcp__claude-in-chrome__navigate"]) assert(allowed.includes(t), t);
+  const disallowed = a[a.indexOf("--disallowedTools") + 1].split(",");
+  for (const t of ["SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_Claude_Docs", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.claude.json)", "Read(**/.env*)", "Read(**/id_rsa*)"])
+    assert(disallowed.includes(t), t);
   const hook = JSON.parse(a[a.indexOf("--settings") + 1]).hooks.PreToolUse[0];
-  const matcher = new RegExp(hook.matcher);
-  for (const t of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "mcp__claude-in-chrome__computer", "mcp__claude-in-chrome__new_tool"]) assert(matcher.test(t), t);
-  assert(!matcher.test("Read") && !matcher.test("BashOutput"));
+  assert.equal(hook.matcher, "*"); // every tool, unknown ones included
   assert(hook.hooks[0].timeout * 1000 >= agent.CONFIRM_TIMEOUT_MS);
   assert(hook.hooks[0].command.endsWith(`'/tmp/d it'\\''s/hook.sock'`), hook.hooks[0].command); // quoted for the shell
   // no hook (socket missing): nothing that changes things gets through
@@ -61,11 +62,13 @@ test("args: only read-only tools pre-approved, user settings ignored, hook insta
 
 test("policy: reading passes, changing anything needs the user", () => {
   const P = agent.toolPolicy;
-  assert.equal(P("Read", {}), "allow");
+  assert.equal(P("Read", { file_path: "/tmp/notes.txt" }), "allow");
+  for (const t of ["Task", "Agent", "ToolSearch", "TodoWrite", "TaskStop", "WebSearch"]) assert.equal(P(t, {}), "allow", t);
+  for (const t of ["WebFetch", "SendMessage", "RemoteTrigger", "ReportFindings", "mcp__claude_ai_Claude_Docs__create", "SomethingNew"]) assert.equal(P(t, {}), "confirm", t);
   assert.equal(P("mcp__claude-in-chrome__get_page_text", {}), "allow");
   assert.equal(P("mcp__claude-in-chrome__computer", { action: "screenshot" }), "allow");
   for (const action of ["left_click", "type", "key", "scroll", "anything_new"]) assert.equal(P("mcp__claude-in-chrome__computer", { action }), "confirm", action);
-  for (const t of ["Bash", "Write", "Edit", "NotebookEdit", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool", "mcp__claude-in-chrome__browser_batch", "mcp__claude-in-chrome__future_tool", "Task"])
+  for (const t of ["Bash", "Write", "Edit", "NotebookEdit", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool", "mcp__claude-in-chrome__browser_batch", "mcp__claude-in-chrome__future_tool"])
     assert.equal(P(t, {}), "confirm", t);
 });
 
@@ -107,14 +110,17 @@ else if (prompt.startsWith("group:")) {
   const c = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], { stdio: "ignore" });
   fs.writeFileSync(prompt.slice(6), String(c.pid));
   setInterval(() => {}, 1000);
-} else if (prompt.startsWith("bash:")) {
-  const command = "touch " + prompt.slice(5);
-  say({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command } }] } });
+} else if (prompt.startsWith("bash:") || prompt.startsWith("tool:")) {
+  // "bash:<marker>" runs Bash touch; "tool:<name>:<marker>" a tool the app has never heard of
+  const [name, marker] = prompt.startsWith("bash:") ? ["Bash", prompt.slice(5)] : prompt.slice(5).split(":");
+  const command = "touch " + marker;
+  const input = name === "Bash" ? { command } : { target: marker };
+  say({ type: "assistant", message: { content: [{ type: "tool_use", name, input }] } });
   const i = args.indexOf("--settings");
-  const hook = i >= 0 && JSON.parse(args[i + 1]).hooks.PreToolUse.find((h) => new RegExp(h.matcher).test("Bash"));
+  const hook = i >= 0 && JSON.parse(args[i + 1]).hooks.PreToolUse.find((h) => h.matcher === "*" || new RegExp(h.matcher).test(name));
   let decision = "deny";
   if (hook) {
-    const out = spawnSync("sh", ["-c", hook.hooks[0].command], { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: { command } }) });
+    const out = spawnSync("sh", ["-c", hook.hooks[0].command], { input: JSON.stringify({ hook_event_name: "PreToolUse", tool_name: name, tool_input: input }) });
     decision = JSON.parse(out.stdout).hookSpecificOutput.permissionDecision;
   }
   if (decision === "allow") execSync(command);
@@ -124,6 +130,43 @@ else result(resume ? "feito" : "CONFIRMAR: " + prompt);
 `,
 );
 chmodSync(fake, 0o755);
+
+test("policy: sensitive files are refused, also through ~, relative paths, links and searches", () => {
+  const P = agent.toolPolicy;
+  const home = homedir();
+  for (const f of ["~/.ssh/id_ed25519", "~/.gnupg/pubring.kbx", "~/.claude.json", "~/.claude/.credentials.json", "~/.config/DronsioFlow/settings.json",
+    "~/.config/google-chrome/Default/Cookies", "~/.local/share/keyrings/login.keyring", "~/.mozilla/firefox/x/logins.json",
+    `${home}/.ssh`, "/srv/app/.env.local", "/tmp/server.pem", "/tmp/tls.key", "/backup/id_rsa.pub"])
+    assert.equal(P("Read", { file_path: f }), "deny", f);
+  assert.equal(P("Read", { file_path: "../.ssh/config" }, { cwd: join(home, "Documentos") }), "deny");
+  assert.equal(P("Read", { file_path: "Documentos/a.txt" }, { cwd: home }), "allow");
+  const link = join(dir, "innocent");
+  symlinkSync(join(home, ".config"), link);
+  assert.equal(P("Read", { file_path: join(link, "anything.txt") }), "deny", "link into ~/.config");
+  assert.equal(P("Grep", { pattern: "BEGIN", path: "~/.gnupg" }), "deny");
+  assert.equal(P("Glob", { pattern: "~/.ssh/*" }), "deny");
+  assert.equal(P("Grep", { pattern: "x", glob: `${home}/.config/**/*.json` }), "deny");
+  assert.equal(P("Grep", { pattern: "token", path: "/srv/app/.env" }), "deny");
+  assert.equal(P("Grep", { pattern: "x" }, { cwd: home }), "confirm", "the whole home holds sensitive folders");
+  assert.equal(P("Glob", { pattern: "**/*.md", path: home }), "confirm");
+  assert.equal(P("Glob", { pattern: "**/*.md", path: "/tmp" }), "allow");
+  assert.equal(P("Grep", { pattern: "x", path: join(home, "Documentos") }), "allow");
+});
+
+test("WebFetch dialog shows the URL and the prompt", () => {
+  const d = agent.describeToolCall("WebFetch", { url: "https://evil.example/?q=segredo", prompt: "resuma" });
+  assert(d.detail.includes("https://evil.example/?q=segredo") && d.detail.includes("resuma"));
+});
+
+test("startup cleanup removes only old socket folders", () => {
+  const old = mkdtempSync(join(tmpdir(), "dronsio-agent-"));
+  const fresh = mkdtempSync(join(tmpdir(), "dronsio-agent-"));
+  const twoDaysAgo = (Date.now() - 2 * 24 * 3600 * 1000) / 1000;
+  utimesSync(old, twoDaysAgo, twoDaysAgo);
+  agent.cleanStaleDirs();
+  assert(!existsSync(old) && existsSync(fresh));
+  rmSync(fresh, { recursive: true });
+});
 
 test("findClaude: configured path, PATH, missing", () => {
   assert.equal(agent.findClaude(fake), fake);
@@ -176,6 +219,24 @@ test("hook: blocks the Bash call until the app answers; Cancelar denies, Confirm
     } finally {
       server.close();
     }
+  }
+});
+
+test("hook: an unknown tool goes through the hook and needs confirmation; Cancelar denies", async () => {
+  const marker = join(dir, "unknown-ran");
+  const seen = [];
+  const server = await agent.permissionServer(async (call) => {
+    const policy = agent.toolPolicy(call.tool_name, call.tool_input);
+    seen.push([call.tool_name, policy]);
+    return policy === "allow"; // "confirm": the user cancels
+  });
+  try {
+    const out = await agent.run({ bin: fake, prompt: `tool:BrandNewTool:${marker}`, hookSocket: server.socketPath, timeoutMs: 10000 }).promise;
+    assert.deepEqual(seen, [["BrandNewTool", "confirm"]]);
+    assert.equal(out.result, "negado");
+    assert(!existsSync(marker));
+  } finally {
+    server.close();
   }
 });
 
