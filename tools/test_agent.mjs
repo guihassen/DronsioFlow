@@ -50,7 +50,9 @@ test("args: only read-only tools pre-approved, user settings ignored, hook insta
     assert(!allowed.includes(t), t);
   for (const t of ["Read", "Grep", "mcp__claude-in-chrome__read_page", "mcp__claude-in-chrome__navigate"]) assert(allowed.includes(t), t);
   const disallowed = a[a.indexOf("--disallowedTools") + 1].split(",");
-  for (const t of ["SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_Claude_Docs", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.claude.json)", "Read(**/.env*)", "Read(**/id_rsa*)"])
+  for (const t of ["SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_*", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.claude.json)", "Read(**/.env*)", "Read(**/id_rsa*)",
+    "Read(~/.var/**)", "Read(~/.aws/**)", "Read(~/.git-credentials)", "Read(~/.netrc)", "Read(~/.local/share/**)", "Read(~/.kube/**)", "Read(~/.docker/**)", "Read(~/.password-store/**)",
+    "Read(~/.bash_history)", "Read(~/.zsh_history)", "Read(~/.pgpass)", "Read(~/.npmrc)"])
     assert(disallowed.includes(t), t);
   const hook = JSON.parse(a[a.indexOf("--settings") + 1]).hooks.PreToolUse[0];
   assert.equal(hook.matcher, "*"); // every tool, unknown ones included
@@ -151,6 +153,28 @@ test("policy: sensitive files are refused, also through ~, relative paths, links
   assert.equal(P("Glob", { pattern: "**/*.md", path: home }), "confirm");
   assert.equal(P("Glob", { pattern: "**/*.md", path: "/tmp" }), "allow");
   assert.equal(P("Grep", { pattern: "x", path: join(home, "Documentos") }), "allow");
+});
+
+test("policy: other dotfiles of the home ask first, /proc is refused", () => {
+  const P = agent.toolPolicy;
+  for (const f of ["~/.aws/credentials", "~/.var/app/x/cookies.sqlite", "~/.bash_history", "~/.local/share/app/data.db", "~/Projetos/x/.git/config"])
+    assert.equal(P("Read", { file_path: f }), "confirm", f);
+  assert.equal(P("Read", { file_path: "~/Documentos/a.txt" }), "allow");
+  assert.equal(P("Read", { file_path: "/srv/site/.htaccess" }), "allow", "dotfiles outside the home are not someone's credentials");
+  assert.equal(P("Grep", { pattern: "x", path: "~/.aws" }), "confirm");
+  assert.equal(P("Glob", { pattern: "~/.var/**/*.sqlite" }), "confirm");
+  for (const f of ["/proc/self/environ", "/proc/1/cmdline", "/proc/self/cwd/Documentos/a.txt", "/proc"]) assert.equal(P("Read", { file_path: f }), "deny", f);
+  assert.equal(P("Grep", { pattern: "x", path: "/proc/self/cwd" }), "deny");
+});
+
+test("policy: subagents only here or in a local worktree", () => {
+  const P = agent.toolPolicy;
+  for (const t of ["Task", "Agent"]) {
+    assert.equal(P(t, { prompt: "x" }), "allow");
+    assert.equal(P(t, { prompt: "x", isolation: "worktree" }), "allow");
+    assert.equal(P(t, { prompt: "x", isolation: "remote" }), "confirm");
+    assert.equal(P(t, { prompt: "x", isolation: "something-new" }), "confirm");
+  }
 });
 
 test("WebFetch dialog shows the URL and the prompt", () => {

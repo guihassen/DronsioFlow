@@ -39,7 +39,8 @@ const READ_ONLY_CHROME = [
 const READ_ONLY_COMPUTER = ["screenshot", "zoom"];
 const DISALLOWED_TOOLS = [
   "SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
-  "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_Claude_Docs",
+  "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill",
+  "mcp__claude_ai_*", // every claude.ai account connector (Docs, Gmail…); the CLI matches the prefix
 ];
 // Never read, not even with confirmation: keys, tokens, browser profiles, the app's and Claude's own data.
 const SENSITIVE_DIRS = [".ssh", ".gnupg", ".claude", ".config", ".local/share/keyrings", ".mozilla"];
@@ -49,6 +50,10 @@ const DISALLOWED_READS = [
   ...SENSITIVE_DIRS.map((d) => `Read(~/${d}/**)`),
   ...SENSITIVE_FILES.map((f) => `Read(~/${f})`),
   "Read(**/.env*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(**/id_rsa*)", "Read(**/id_ed25519*)",
+  // more credentials and app data; toolPolicy asks before reading any other dotfile of the home
+  "Read(~/.var/**)", "Read(~/.aws/**)", "Read(~/.git-credentials)", "Read(~/.netrc)", "Read(~/.local/share/**)",
+  "Read(~/.kube/**)", "Read(~/.docker/**)", "Read(~/.password-store/**)", "Read(~/.bash_history)", "Read(~/.zsh_history)",
+  "Read(~/.pgpass)", "Read(~/.npmrc)",
 ];
 const HOOK_MATCHER = "*"; // every tool
 const HOOK_SCRIPT = path.join(__dirname, "..", "native", "agent_hook.js");
@@ -80,7 +85,11 @@ function realPath(p, cwd) {
 
 const inside = (p, dir) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
 
-/** "deny" for a sensitive file or anything inside a sensitive folder, "contains" when one is below p. */
+/**
+ * "deny" for a sensitive file, anything inside a sensitive folder or under /proc (/proc/self/cwd
+ * and friends lead anywhere); "contains" when a sensitive folder is below p; "hidden" for a dotfile
+ * or dot folder of the home (other apps' data and credentials); else null.
+ */
 function sensitivity(p, cwd) {
   const home = os.homedir();
   const lexical = path.resolve(cwd, String(p).replace(/^~(?=$|\/)/, home));
@@ -88,11 +97,11 @@ function sensitivity(p, cwd) {
   const files = SENSITIVE_FILES.map((f) => path.join(home, f));
   const targets = [...dirs, ...files];
   for (const t of [...targets]) targets.push(realPath(t, cwd)); // ~/.config may itself be a link
-  for (const candidate of new Set([lexical, realPath(p, cwd)])) {
-    if (SENSITIVE_NAME.test(path.basename(candidate))) return "deny";
-    if (targets.some((t) => inside(candidate, t))) return "deny";
-    if (targets.some((t) => inside(t, candidate))) return "contains";
-  }
+  const candidates = [...new Set([lexical, realPath(p, cwd)])];
+  const hidden = (c) => inside(c, home) && path.relative(home, c).split(path.sep).some((part) => part.startsWith("."));
+  if (candidates.some((c) => inside(c, "/proc") || SENSITIVE_NAME.test(path.basename(c)) || targets.some((t) => inside(c, t)))) return "deny";
+  if (candidates.some((c) => targets.some((t) => inside(t, c)))) return "contains";
+  if (candidates.some(hidden)) return "hidden";
   return null;
 }
 
@@ -114,13 +123,17 @@ function searchRoot(name, input) {
 function toolPolicy(name, input, { cwd = os.homedir() } = {}) {
   if (name === "Read") {
     if (typeof input?.file_path !== "string") return "confirm";
-    return sensitivity(input.file_path, cwd) === "deny" ? "deny" : "allow";
+    const s = sensitivity(input.file_path, cwd);
+    return s === "deny" ? "deny" : s === "hidden" ? "confirm" : "allow";
   }
   if (name === "Glob" || name === "Grep") {
     const s = sensitivity(searchRoot(name, input) ?? cwd, cwd);
-    // a search over a folder that holds sensitive ones (e.g. the whole home) is shown first
-    return s === "deny" ? "deny" : s === "contains" ? "confirm" : "allow";
+    // a search over a dot folder or one that holds sensitive ones (e.g. the whole home) is shown first
+    return s === "deny" ? "deny" : s ? "confirm" : "allow";
   }
+  // a subagent runs here (or in a local worktree) with its calls going through this same hook;
+  // anywhere else ("remote"…) it would escape it
+  if ((name === "Task" || name === "Agent") && input?.isolation != null && input.isolation !== "worktree") return "confirm";
   if (READ_ONLY_TOOLS.includes(name) || AGENT_TOOLS.includes(name)) return "allow";
   if (name.startsWith(CHROME)) {
     const tool = name.slice(CHROME.length);
