@@ -100,7 +100,8 @@ function statusLines() {
   const ai = !settings.ai.enabled ? ["wait", "IA desligada"] : aiOn ? ["ok", "IA pronta"] : ["bad", "IA indisponível"];
   const inputOk = state.input.keyboards > 0 && state.input.uinput;
   const input = inputOk ? ["ok", "Atalhos e colagem ok"] : ["bad", "Sem acesso ao teclado"];
-  return [voice, ai, input].map(([tone, label]) => `<div class="status-line"><span class="dot ${tone}"></span>${esc(label)}</div>`).join("");
+  const agent = state.agent.running ? [["active", state.agent.step === "confirm" ? "Agente aguardando confirmação" : "Agente executando…"]] : [];
+  return [voice, ...agent, ai, input].map(([tone, label]) => `<div class="status-line"><span class="dot ${tone}"></span>${esc(label)}</div>`).join("");
 }
 
 function renderShell() {
@@ -144,7 +145,7 @@ function historyGroups(items, page) {
     if (!groups.length || groups.at(-1).label !== label) groups.push({ label, items: [] });
     groups.at(-1).items.push(h);
   }
-  const KIND = { command: "Comando", polish: "Transformação", note: "Nota" };
+  const KIND = { command: "Comando", polish: "Transformação", note: "Nota", agent: "Agente" };
   return groups
     .map(
       (g, i) => `
@@ -153,7 +154,7 @@ function historyGroups(items, page) {
         .map(
           (h) => `<div class="row">
             <span class="time">${timeLabel(h.at)}</span>
-            <div class="body">${KIND[h.kind] ? `<span class="kind">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p></div>
+            <div class="body">${KIND[h.kind] ? `<span class="kind ${h.kind}">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p></div>
             <div class="actions">
               <button class="icon-btn small" data-act="copy" data-text="${esc(h.text)}" title="Copiar">${icon("copy", 16)}</button>
               <button class="icon-btn small" data-act="delete-history" data-arg="${esc(h.at)}" title="Apagar">${icon("trash", 16)}</button>
@@ -266,7 +267,7 @@ function pageInsights() {
     d.setDate(d.getDate() - i);
     days.push({ key: d.toDateString(), label: d.toLocaleDateString("pt-BR", { day: "2-digit" }), words: 0, today: i === 0 });
   }
-  const byKind = { dictation: 0, command: 0, note: 0, polish: 0 };
+  const byKind = { dictation: 0, command: 0, note: 0, polish: 0, agent: 0 };
   let speakingMs = 0;
   for (const h of history) {
     const day = days.find((d) => d.key === new Date(h.at).toDateString());
@@ -293,6 +294,7 @@ function pageInsights() {
       <div class="item"><h4>Comandos</h4><b>${fmt(byKind.command)}</b></div>
       <div class="item"><h4>Transformações</h4><b>${fmt(byKind.polish)}</b></div>
       <div class="item"><h4>Notas por voz</h4><b>${fmt(byKind.note)}</b></div>
+      <div class="item"><h4>Agente</h4><b>${fmt(byKind.agent)}</b></div>
     </div>
     <p class="muted">"Minutos economizados" compara o tempo que você levaria digitando a 40 palavras por minuto com o tempo que passou falando.</p>
   </div></div>`;
@@ -455,6 +457,7 @@ const SHORTCUTS = [
   ["handsFree", "Mãos livres", "Aperte para começar e de novo para terminar."],
   ["command", "Modo comando", "Com texto selecionado: diga o que fazer com ele. Sem seleção: peça algo."],
   ["note", "Nota por voz", "Dita uma nota que vai para Notas, sem colar."],
+  ["agent", "Modo agente", "Fale uma tarefa e o Claude Code a executa no computador. Cada ação que altera algo pede confirmação; Esc cancela. Os outros atalhos seguem funcionando enquanto ele trabalha."],
   ["pasteLast", "Colar o último ditado", "Cola de novo a última transcrição."],
   ["copyLast", "Copiar o último ditado", "Copia a última transcrição."],
 ];
@@ -509,7 +512,8 @@ function settingsBody() {
       <div class="item"><div><h4>Formatar ditados com IA</h4><p>Reescreve cada ditado no estilo escolhido em Estilo, com autocorreções e listas. Acrescenta alguns segundos por ditado.</p></div><div class="control">${sw(settings.ai.formatDictation && settings.ai.enabled, 'data-ai="formatDictation"')}</div></div>
       <div class="item"><div><h4>Modelo do Ollama</h4><p>${state.ollama.available ? `${state.ollama.models.length} modelo(s) instalado(s). Modelos menores respondem mais rápido.` : "Ollama não encontrado em localhost:11434."}</p></div>
         <div class="control"><select class="select" data-ai-select="model">${optionList(models.map((m) => [m, m]), settings.ai.model)}</select><button class="icon-btn" data-act="refresh-ollama" title="Atualizar lista">${icon("search", 16)}</button></div></div>
-    </div>`;
+    </div>
+    ${agentSettings()}`;
   }
   return `<h2>Sistema</h2><div class="group">
       <div class="item"><div><h4>Iniciar com o sistema</h4><p>Abre em segundo plano ao entrar na sessão.</p></div><div class="control">${sw(settings.autostart, 'data-set="autostart"')}</div></div>
@@ -526,11 +530,39 @@ function settingsBody() {
     </div>`;
 }
 
+function agentSettings() {
+  const { settings, state } = S;
+  const a = settings.agent;
+  const bin = state.agent.bin;
+  const on = a.enabled ?? Boolean(bin);
+  const missing = a.bin.trim()
+    ? `Nada executável em ${esc(a.bin.trim())}. Corrija o caminho ou deixe em branco para procurar o <code>claude</code> no PATH.`
+    : `Claude Code não encontrado (nem no PATH, nem em ~/.local/bin/claude). Instale em <a href="https://claude.com/claude-code" target="_blank">claude.com/claude-code</a> e faça login com <code>claude</code>.`;
+  return `<div class="group-title">Modo agente</div>
+    <div class="group">
+      <div class="item"><div><h4>Modo agente (Claude Code)</h4><p>${settings.shortcuts.agent?.length ? `Segure ${keysHtml(settings.shortcuts.agent, { soft: true })}` : "Com um atalho definido, segure-o"}, fale uma tarefa e o Claude Code a executa no computador e no navegador. Antes de cada ação que altera algo (comando, arquivo, clique ou digitação), o DronsioFlow mostra a ação exata e só a deixa executar se você confirmar.</p>
+        ${bin ? "" : `<p class="warn">${missing}</p>`}
+        ${settings.shortcuts.agent?.length ? "" : `<p class="warn">Sem atalho: Ctrl + Super + Shift já é usado por outra ação. Escolha um em Configurações → Atalhos.</p>`}</div><div class="control">${sw(on, 'data-agent="enabled"')}</div></div>
+      <div class="item"><div><h4>Caminho do Claude Code</h4><p>${bin ? `Usando <code>${esc(bin)}</code>.` : "Não encontrado."} Em branco: <code>claude</code> do PATH ou ~/.local/bin/claude.</p></div>
+        <div class="control"><input class="input" style="width:220px" data-agent-text="bin" placeholder="claude" value="${esc(a.bin)}" spellcheck="false" /></div></div>
+      <div class="item"><div><h4>Tempo máximo</h4><p>Por etapa do agente; passado o limite, ele é interrompido.</p></div>
+        <div class="control"><select class="select" data-agent-select="timeoutMin">${optionList([5, 10, 20, 30, 60].map((m) => [String(m), `${m} min`]), String(a.timeoutMin))}</select></div></div>
+    </div>
+    <p class="muted">A instrução falada (já transcrita) e o conteúdo das páginas e arquivos que o agente abre vão para a sua conta Claude. O áudio continua só no computador.</p>`;
+}
+
 function renderModal() {
   const root = $("#modal-root");
   const capture = S.state.capture;
   let html = "";
-  if (capture) {
+  const action = S.state.agent.step === "confirm" && S.state.agent.action;
+  const confirming = Boolean(action);
+  if (confirming) {
+    html = `<div class="modal confirm"><h2>Confirmar ação do agente</h2><p class="lead">${esc(action.title)}:</p>
+      <div class="confirm-action">${esc(action.detail)}</div>
+      <p class="muted">Confira os detalhes antes de confirmar. Se cancelar, nada é executado.</p>
+      <div class="foot"><button class="btn secondary" data-act="agent-confirm" data-arg="${esc(action.id)}:0">Cancelar</button><button class="btn danger" data-act="agent-confirm" data-arg="${esc(action.id)}:1">Confirmar</button></div></div>`;
+  } else if (capture) {
     const name = capture.startsWith("polish:")
       ? S.settings.polishPresets.find((p) => `polish:${p.id}` === capture)?.name || "Transformação"
       : [...SHORTCUTS, ...STYLE_SHORTCUTS.map(([n, t]) => [n, n === "cycleStyle" ? t : `Estilo ${t}`])].find(([n]) => n === capture)?.[1] || capture;
@@ -566,8 +598,10 @@ function renderModal() {
   const open = Boolean(html);
   if (!open) return (root.innerHTML = "");
   // keep focus/typing intact when only the data behind an open form changed
-  if (root.dataset.kind === (capture ? "capture" : ui.modal) && root.contains(document.activeElement) && document.activeElement.matches("input,textarea,select")) return;
-  root.dataset.kind = capture ? "capture" : ui.modal;
+  const kind = confirming ? "confirm" : capture ? "capture" : ui.modal;
+  if (root.dataset.kind === kind && root.contains(document.activeElement) && document.activeElement.matches("input,textarea,select")) return;
+  root.dataset.kind = kind;
+  if (confirming && ui.confirmId !== action.id) Object.assign(ui, { confirmId: action.id, confirmShownAt: Date.now() });
   root.innerHTML = `<div class="overlay-bg" data-act="backdrop">${html}</div>`;
   root.querySelector("[autofocus]")?.focus();
 }
@@ -615,6 +649,7 @@ document.addEventListener("focusout", () => setTimeout(() => ui.pendingRender &&
 // ---- actions --------------------------------------------------------------------
 
 const setAi = (patch) => api.setSettings({ ai: { ...S.settings.ai, ...patch } });
+const setAgent = (patch) => api.setSettings({ agent: { ...S.settings.agent, ...patch } });
 
 async function loadMics() {
   ui.mics = await api.listMicrophones();
@@ -649,7 +684,7 @@ const ACTIONS = {
     render();
   },
   backdrop: (_a, ev) => {
-    if (ev.target.classList.contains("overlay-bg") && !S.state.capture) ACTIONS["close-modal"]();
+    if (ev.target.classList.contains("overlay-bg") && !S.state.capture && S.state.agent.step !== "confirm") ACTIONS["close-modal"]();
   },
   dismiss: (id) => api.setSettings({ dismissed: [...(S.settings.dismissed || []), id] }),
   "dismiss-error": () => api.dismissError(),
@@ -717,6 +752,12 @@ const ACTIONS = {
     document.activeElement?.blur();
     api.deleteNote(id);
   },
+  // a click meant for the previous dialog must not confirm the next one that just replaced it
+  // the answer carries the id of the dialog it belongs to, so the main process can drop a stale one
+  "agent-confirm": (arg) => {
+    const [id, ok] = arg.split(":");
+    if (ok !== "1" || Date.now() - ui.confirmShownAt > 600) api.agentConfirm(id, ok === "1");
+  },
   "refresh-ollama": () => api.refreshOllama(),
   "open-folder": () => api.openFolder(),
   quit: () => api.quit(),
@@ -735,6 +776,9 @@ document.addEventListener("change", (ev) => {
   else if (el.dataset.select) api.setSettings({ [el.dataset.select]: el.value });
   else if (el.dataset.ai) setAi({ [el.dataset.ai]: el.checked });
   else if (el.dataset.aiSelect) setAi({ [el.dataset.aiSelect]: el.value });
+  else if (el.dataset.agent) setAgent({ [el.dataset.agent]: el.checked });
+  else if (el.dataset.agentText) setAgent({ [el.dataset.agentText]: el.value.trim() });
+  else if (el.dataset.agentSelect) setAgent({ [el.dataset.agentSelect]: Number(el.value) });
 });
 
 const timers = {};
@@ -786,7 +830,8 @@ document.addEventListener("submit", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && ui.modal && !S.state.capture) ACTIONS["close-modal"]();
+  if (ev.key === "Escape" && S.state.agent.step === "confirm") api.agentConfirm(ui.confirmId, false);
+  else if (ev.key === "Escape" && ui.modal && !S.state.capture) ACTIONS["close-modal"]();
 });
 
 $("#toggle-sidebar").addEventListener("click", () => {
