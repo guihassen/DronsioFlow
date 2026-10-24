@@ -929,7 +929,7 @@ function reportAgentProblem() {
   notify("Modo agente indisponível", problem);
 }
 
-const agentBusy = () => flash("Agente já em execução · Esc cancela");
+const agentBusy = () => flash("Agente já em execução");
 
 function cancelAgent({ force = false } = {}) {
   if (!agentJob || agentJob.cancelled) return;
