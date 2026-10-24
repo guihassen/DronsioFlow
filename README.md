@@ -169,13 +169,24 @@ Segure **Ctrl + Super + Shift**, fale uma tarefa e solte: a instrução transcri
 Claude in Chrome) e o terminal. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
 perguntando como ela está".
 
-- **Confirmação garantida pelo app**: toda ferramenta que altera algo (comando no terminal, criar ou editar arquivo,
-  clicar, digitar, preencher campo ou rodar script no Chrome) é interceptada antes de executar. A janela do
-  DronsioFlow vem para a frente mostrando a ação **real**: o comando exato, o caminho e o começo do conteúdo do
-  arquivo, o alvo do clique ou o texto digitado, e não a descrição que o modelo deu. Só **Confirmar** deixa
-  executar; **Cancelar**, Esc no diálogo ou 5 minutos sem resposta recusam, e o agente termina dizendo o que não fez.
-  Isso vale mesmo que uma página ou mensagem tente instruir o agente a agir sozinho. Ler (abrir páginas, pesquisar,
-  ler arquivos, capturar a tela) não pede confirmação.
+- **Confirmação garantida pelo app**: **toda** chamada de ferramenta passa pela checagem do app antes de executar.
+  Ler (abrir páginas, pesquisar, ler arquivos, capturar a tela) e a organização interna do agente (subagentes, lista
+  de tarefas) passam direto. Todo o resto pede confirmação, inclusive ferramentas que o app não conhece:
+  comandos no terminal, criar ou editar arquivos, buscar uma URL com WebFetch, clicar, digitar, preencher campos ou
+  rodar script no Chrome. A janela do DronsioFlow vem para a frente mostrando a ação **real**: o comando exato, o
+  caminho e o começo do conteúdo do arquivo, a URL buscada, o alvo do clique ou o texto digitado, e não a descrição
+  que o modelo deu. Só **Confirmar** deixa executar; **Cancelar**, Esc no diálogo ou 5 minutos sem resposta recusam,
+  e o agente termina dizendo o que não fez. A resposta vale só para o diálogo que está na tela. Isso vale mesmo que
+  uma página ou mensagem tente instruir o agente a agir sozinho.
+- **Arquivos sensíveis nunca são lidos**, nem com confirmação: `~/.ssh`, `~/.gnupg`, `~/.claude` e `~/.claude.json`,
+  `~/.config` (inclui o próprio DronsioFlow e os perfis do Chrome/Chromium), `~/.local/share/keyrings`, `~/.mozilla`,
+  e em qualquer lugar arquivos `.env*`, `*.pem`, `*.key`, `id_rsa*` e `id_ed25519*`. O caminho é conferido depois de
+  expandir `~` e seguir links, e buscas (Glob/Grep) nesses lugares também são recusadas.
+- **Ferramentas que agem fora desta tarefa ficam desligadas**: mensagens para outras sessões, gatilhos remotos,
+  agendamentos, notificações push, worktrees, skills e os conectores da conta claude.ai.
+- **Risco residual aceito**: abrir uma página no Chrome (`navigate`) não pede confirmação. Como o Chrome usa as suas
+  sessões logadas, um link que faz algo só por ser aberto (um GET com efeito, como "confirmar inscrição" ou
+  "descadastrar") seria seguido sem perguntar, e a URL aberta pode levar dados para fora dentro dela.
 - Antes de enviar mensagem ou e-mail, publicar ou comprar, o agente também para e descreve a ação em uma frase, para
   você confirmar a intenção antes dos cliques.
 - **Os outros atalhos seguem funcionando** enquanto o agente trabalha: ditado, comando, nota, transformações e
@@ -190,9 +201,11 @@ perguntando como ela está".
 - Em **Configurações → IA → Modo agente**: liga/desliga (vem ligado se o `claude` for encontrado), caminho do
   binário e tempo máximo de cada etapa (padrão 10 min).
 - Por baixo, o app roda `claude -p` sem shell, num grupo de processos próprio (cancelar ou estourar o tempo encerra
-  o `claude` e tudo o que ele abriu). Só ferramentas de leitura são pré-aprovadas; as que alteram algo passam por um
-  hook `PreToolUse` (`app/native/agent_hook.js`) que pergunta ao app por um socket Unix privado (pasta 0700, socket
-  0600) e, se o app não responder, recusa. Com `--setting-sources ""`, as permissões do seu `~/.claude/settings.json`
+  o `claude` e tudo o que ele abriu). Um hook `PreToolUse` com matcher `*` (`app/native/agent_hook.js`) pergunta ao
+  app, por um socket Unix privado (pasta 0700, socket 0600), sobre cada chamada; se o app não responder, recusa, e
+  aí só as ferramentas de leitura pré-aprovadas funcionam. `--disallowedTools` é uma segunda camada para as
+  ferramentas desligadas e a leitura dos arquivos sensíveis. Pastas de socket que sobrarem de uma saída forçada são
+  apagadas na abertura seguinte depois de um dia. Com `--setting-sources ""`, as permissões do seu `~/.claude/settings.json`
   (`permissions.allow`, `defaultMode`) e os hooks e configurações do projeto não valem para o agente; o login da
   conta continua funcionando (fica fora desses arquivos). Nunca `--dangerously-skip-permissions`.
 
@@ -321,9 +334,9 @@ Depois de editar algo em `app/`, rode `./install.sh` de novo e reinicie o app.
 - `tools/bench_llm.mjs`: compara modelos do Ollama nos prompts reais do app.
 - `tools/press_keys.py`: simula um atalho por um teclado virtual.
 - `tools/make_sounds.py`: gera os sons de início/fim.
-- `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:`, a política das ferramentas, o
-  hook de confirmação de ponta a ponta (com um `claude` falso que chama o hook real) e o cancelamento/tempo esgotado
-  do grupo de processos.
+- `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:`, a política das ferramentas
+  (inclusive caminhos sensíveis e ferramentas desconhecidas), o hook de confirmação de ponta a ponta (com um `claude`
+  falso que chama o hook real) e o cancelamento/tempo esgotado do grupo de processos.
 - Variáveis de ambiente: `DRONSIO_TEST_WAV=arquivo.wav` (usa o arquivo no lugar do microfone),
   `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico),
   `DRONSIO_TEST_AGENT_TEXT="tarefa"` (no modo agente, usa esse texto no lugar da transcrição), `DRONSIO_USER_NAME` (nome na saudação),
