@@ -10,10 +10,13 @@ o cursor estiver, em qualquer app — terminal, navegador, editor, Claude Code�
 ![Tela inicial](docs/screenshots/inicio.png)
 
 - Reconhecimento de voz com **Whisper** ([faster-whisper](https://github.com/SYSTRAN/faster-whisper)) rodando no seu CPU.
-- Sem conta, sem limite e sem internet (só para baixar os modelos na primeira vez). O áudio nunca sai do computador.
+- Sem conta, sem limite e sem internet (só para baixar os modelos na primeira vez; o modo agente opcional é a
+  exceção). O áudio nunca sai do computador.
 - Funciona no **Wayland** (testado no GNOME) e no X11.
 - IA local opcional com **[Ollama](https://ollama.com)**: modo comando, transformações, formatação por estilo e
   resumo de reuniões.
+- **Modo agente** opcional: fale uma tarefa e o [Claude Code](https://claude.com/claude-code) a executa no computador
+  e no navegador (usa a sua conta Claude; veja [Privacidade](#privacidade)).
 
 ## Sumário
 
@@ -66,11 +69,12 @@ Funcionam em qualquer app, mesmo com a janela fechada.
 | Travar em mãos livres | Espaço durante o "segurar para falar" | continua gravando depois de soltar as teclas |
 | Modo comando | Ctrl + Super + Alt (segurar) | instrução falada sobre o texto selecionado (veja abaixo) |
 | Nota por voz | sem padrão (defina nas configurações) | dita uma nota que vai para **Notas**, sem colar |
+| Modo agente | Ctrl + Super + Shift (segurar) | fala uma tarefa para o Claude Code executar (veja [Modo agente](#modo-agente)) |
 | Colar o último ditado | Shift + Alt + Z | cola de novo a última transcrição |
 | Copiar o último ditado | Shift + Alt + X | copia a última transcrição |
 | Transformações | um atalho por transformação | reescreve o texto selecionado |
 | Mudar de estilo | sem padrão (sugestão: Ctrl + Alt + 1…4) | um atalho por estilo e um para alternar entre eles; a barra flutuante mostra o novo estilo |
-| Cancelar | Esc | descarta a gravação atual |
+| Cancelar | Esc | descarta a gravação atual ou interrompe o agente |
 
 Os atalhos mudam em **Configurações → Atalhos**. Vale qualquer combinação de teclas, inclusive com os botões
 laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a mesma tecla. Gravações com menos de
@@ -158,6 +162,28 @@ laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a m
 A "seleção" usada pelo modo comando e pelas transformações é a seleção primária do Linux: o texto destacado com o
 mouse ou o teclado em qualquer app.
 
+### Modo agente
+
+Segure **Ctrl + Super + Shift**, fale uma tarefa e solte: a instrução transcrita vai para o
+[Claude Code](https://claude.com/claude-code) instalado no computador, que a executa usando o Chrome (integração
+Claude in Chrome) e o terminal. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
+perguntando como ela está".
+
+- **Confirmação de ações sensíveis**: antes de enviar mensagem ou e-mail, publicar, comprar, criar ou apagar arquivos
+  ou rodar comandos que alteram o sistema, o agente para e descreve a ação exata. A janela do DronsioFlow vem para a
+  frente com **Confirmar** e **Cancelar**; só depois de confirmar ele continua a mesma sessão. Cancelar encerra sem
+  executar.
+- **Esc** cancela a gravação, o agente em execução ou a confirmação pendente.
+- A resposta final aparece numa notificação e fica no histórico marcada como **Agente** (e conta em Estatísticas).
+- Como no modo comando, dá para começar no "segurar para falar" e adicionar Shift.
+- Requer o Claude Code instalado e logado (`claude` no PATH ou em `~/.local/bin/claude`) e, para o navegador, a
+  extensão Claude in Chrome conectada. Sem o Claude Code, o atalho só mostra um aviso.
+- Em **Configurações → IA → Modo agente**: liga/desliga (vem ligado se o `claude` for encontrado), caminho do
+  binário e tempo máximo de cada etapa (padrão 10 min).
+- Por baixo, o app roda `claude -p` sem shell, com `--permission-mode acceptEdits` e só o navegador, o terminal e as
+  ferramentas de arquivos/web pré-aprovados (nunca `--dangerously-skip-permissions`). A confirmação é uma regra do
+  prompt do agente, conferida pelo app: revise o que ele pede para confirmar.
+
 ### Notas
 
 - Notas rápidas: crie, edite (salvamento automático), copie, apague e busque.
@@ -174,6 +200,9 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 - **Modo comando** (ponto lilás), **nota** (ponto laranja) e **mãos livres** (cadeado).
 - **Processando**: três pontinhos.
 - **Reunião gravando**: ponto vermelho.
+- **Modo agente**: a pílula inteira fica vermelha enquanto grava; enquanto o agente trabalha, pílula preta com borda e
+  pontinhos vermelhos; aguardando confirmação, a borda pulsa e aparece "Confirme no DronsioFlow". O vermelho da
+  reunião é só um ponto ao lado da barra parada, então os dois não se confundem.
 
 ### Janela e interface
 
@@ -197,7 +226,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 | **Geral** | atalho de ditado, microfone (**Automático** com fio, **Automático preferindo fone Bluetooth**, padrão do sistema ou um específico, mostrando qual está em uso), idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
 | **Atalhos** | todos os atalhos (inclusive os de estilo), com remover e restaurar padrão. O app recusa um atalho que já está em uso e avisa quando a combinação também chega ao app em foco (como Ctrl+S), já que as teclas não são bloqueadas |
 | **Voz e modelo** | modelo do Whisper: Tiny (75 MB), Base (145 MB), Small (480 MB, recomendado), Medium (1,5 GB) ou Large v3 Turbo (1,6 GB), com progresso do download |
-| **IA** | liga/desliga a IA local e escolhe o modelo do Ollama |
+| **IA** | liga/desliga a IA local e escolhe o modelo do Ollama; **Modo agente**: liga/desliga, caminho do `claude` e tempo máximo |
 | **Sistema** | iniciar com o sistema, sons de início/fim, mostrar a barra quando parado, tecla de colar (Shift+Insert, Ctrl+V ou Ctrl+Shift+V), restaurar a área de transferência, abrir a pasta de dados, apagar o histórico e sair |
 
 A colagem padrão é Shift+Insert, porque o app preenche tanto a área de transferência quanto a seleção primária
@@ -240,8 +269,12 @@ ditado. Se nenhum microfone enviar áudio, um aviso explica o que fazer.
 
 ## Privacidade
 
-- O áudio é gravado, transcrito e apagado localmente; nada é enviado para servidores.
-- A internet só é usada para baixar os modelos (Hugging Face e Ollama) e o runtime do Electron na instalação.
+- O áudio é gravado, transcrito e apagado localmente; o áudio nunca é enviado para servidores.
+- Ditado, modo comando, transformações e reuniões não enviam nada para fora do computador. A internet só é usada
+  para baixar os modelos (Hugging Face e Ollama) e o runtime do Electron na instalação.
+- **Exceção: o modo agente.** A instrução falada (o texto transcrito, não o áudio) e tudo o que o agente lê para
+  cumprir a tarefa (páginas abertas, arquivos, saída de comandos) vão para a sua conta Claude, pela Anthropic, como
+  em qualquer uso do Claude Code. Desligue em Configurações → IA se não quiser isso.
 - Histórico, notas, reuniões, dicionário e snippets ficam em `~/.config/DronsioFlow/`.
 
 ## Como funciona
@@ -250,6 +283,7 @@ ditado. Se nenhum microfone enviar áudio, um aviso explica o que fazer.
 app/main.js                 processo principal (Electron): atalhos, gravação, IA, histórico, janelas
 app/lib/llm.js              prompts e chamadas ao Ollama (com proteção de memória)
 app/lib/textproc.js         dicionário, snippets e remoção de hesitações sem IA
+app/lib/agent.js            modo agente: roda o Claude Code (claude -p) e detecta pedidos de confirmação
 app/native/input_helper.py  lê teclado/mouse (evdev) e cola (wl-copy/xclip + tecla simulada via uinput)
 app/native/transcriber.py   motor Whisper local (baixa o modelo do Hugging Face na 1ª vez)
 app/ui/                     interface (páginas, modais, tema claro/escuro e a barra flutuante)
@@ -273,8 +307,11 @@ Depois de editar algo em `app/`, rode `./install.sh` de novo e reinicie o app.
 - `tools/bench_llm.mjs`: compara modelos do Ollama nos prompts reais do app.
 - `tools/press_keys.py`: simula um atalho por um teclado virtual.
 - `tools/make_sounds.py`: gera os sons de início/fim.
+- `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:` e a execução/cancelamento do
+  agente com um `claude` falso.
 - Variáveis de ambiente: `DRONSIO_TEST_WAV=arquivo.wav` (usa o arquivo no lugar do microfone),
-  `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico), `DRONSIO_USER_NAME` (nome na saudação),
+  `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico),
+  `DRONSIO_TEST_AGENT_TEXT="tarefa"` (no modo agente, usa esse texto no lugar da transcrição), `DRONSIO_USER_NAME` (nome na saudação),
   `DRONSIO_MODELS_DIR` (pasta dos modelos do Whisper) e `OLLAMA_HOST` (endereço do Ollama).
 
 ## Desinstalar
