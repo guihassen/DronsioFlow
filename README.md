@@ -181,9 +181,14 @@ perguntando como ela está".
 - **Arquivos sensíveis nunca são lidos**, nem com confirmação: `~/.ssh`, `~/.gnupg`, `~/.claude` e `~/.claude.json`,
   `~/.config` (inclui o próprio DronsioFlow e os perfis do Chrome/Chromium), `~/.local/share/keyrings`, `~/.mozilla`,
   e em qualquer lugar arquivos `.env*`, `*.pem`, `*.key`, `id_rsa*` e `id_ed25519*`. O caminho é conferido depois de
-  expandir `~` e seguir links, e buscas (Glob/Grep) nesses lugares também são recusadas.
+  expandir `~` e seguir links, e buscas (Glob/Grep) nesses lugares também são recusadas. Caminhos em `/proc` são
+  sempre recusados. Ler qualquer outro arquivo ou pasta oculta da home (que comece com ".", como `~/.aws`,
+  `~/.var` ou `~/.bash_history`, e também `~/.local/share`) pede confirmação; vários deles (`~/.aws`, `~/.kube`,
+  `~/.docker`, `~/.password-store`, `~/.var`, `~/.local/share`, `~/.netrc`, `~/.git-credentials`, `~/.pgpass`,
+  `~/.npmrc` e os históricos do shell) também ficam bloqueados nas regras do próprio Claude Code.
 - **Ferramentas que agem fora desta tarefa ficam desligadas**: mensagens para outras sessões, gatilhos remotos,
-  agendamentos, notificações push, worktrees, skills e os conectores da conta claude.ai.
+  agendamentos, notificações push, worktrees, skills e todos os conectores da conta claude.ai (`mcp__claude_ai_*`).
+  Subagentes rodam livres só aqui ou numa worktree local; um subagente remoto pede confirmação.
 - **Risco residual aceito**: abrir uma página no Chrome (`navigate`) não pede confirmação. Como o Chrome usa as suas
   sessões logadas, um link que faz algo só por ser aberto (um GET com efeito, como "confirmar inscrição" ou
   "descadastrar") seria seguido sem perguntar, e a URL aberta pode levar dados para fora dentro dela.
