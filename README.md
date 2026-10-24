@@ -69,12 +69,12 @@ Funcionam em qualquer app, mesmo com a janela fechada.
 | Travar em mãos livres | Espaço durante o "segurar para falar" | continua gravando depois de soltar as teclas |
 | Modo comando | Ctrl + Super + Alt (segurar) | instrução falada sobre o texto selecionado (veja abaixo) |
 | Nota por voz | sem padrão (defina nas configurações) | dita uma nota que vai para **Notas**, sem colar |
-| Modo agente | Ctrl + Super + Shift (segurar) | fala uma tarefa para o Claude Code executar (veja [Modo agente](#modo-agente)) |
+| Modo agente | Ctrl + Super + Shift (segurar) | fala uma tarefa para o Claude Code executar (veja [Modo agente](#modo-agente)); se essa combinação já era sua, o modo fica sem atalho até você escolher um |
 | Colar o último ditado | Shift + Alt + Z | cola de novo a última transcrição |
 | Copiar o último ditado | Shift + Alt + X | copia a última transcrição |
 | Transformações | um atalho por transformação | reescreve o texto selecionado |
 | Mudar de estilo | sem padrão (sugestão: Ctrl + Alt + 1…4) | um atalho por estilo e um para alternar entre eles; a barra flutuante mostra o novo estilo |
-| Cancelar | Esc | descarta a gravação atual ou interrompe o agente |
+| Cancelar | Esc | descarta a gravação atual; sem gravação, interrompe o agente |
 
 Os atalhos mudam em **Configurações → Atalhos**. Vale qualquer combinação de teclas, inclusive com os botões
 laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a mesma tecla. Gravações com menos de
@@ -169,20 +169,32 @@ Segure **Ctrl + Super + Shift**, fale uma tarefa e solte: a instrução transcri
 Claude in Chrome) e o terminal. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
 perguntando como ela está".
 
-- **Confirmação de ações sensíveis**: antes de enviar mensagem ou e-mail, publicar, comprar, criar ou apagar arquivos
-  ou rodar comandos que alteram o sistema, o agente para e descreve a ação exata. A janela do DronsioFlow vem para a
-  frente com **Confirmar** e **Cancelar**; só depois de confirmar ele continua a mesma sessão. Cancelar encerra sem
-  executar.
-- **Esc** cancela a gravação, o agente em execução ou a confirmação pendente.
+- **Confirmação garantida pelo app**: toda ferramenta que altera algo (comando no terminal, criar ou editar arquivo,
+  clicar, digitar, preencher campo ou rodar script no Chrome) é interceptada antes de executar. A janela do
+  DronsioFlow vem para a frente mostrando a ação **real**: o comando exato, o caminho e o começo do conteúdo do
+  arquivo, o alvo do clique ou o texto digitado, e não a descrição que o modelo deu. Só **Confirmar** deixa
+  executar; **Cancelar**, Esc no diálogo ou 5 minutos sem resposta recusam, e o agente termina dizendo o que não fez.
+  Isso vale mesmo que uma página ou mensagem tente instruir o agente a agir sozinho. Ler (abrir páginas, pesquisar,
+  ler arquivos, capturar a tela) não pede confirmação.
+- Antes de enviar mensagem ou e-mail, publicar ou comprar, o agente também para e descreve a ação em uma frase, para
+  você confirmar a intenção antes dos cliques.
+- **Os outros atalhos seguem funcionando** enquanto o agente trabalha: ditado, comando, nota, transformações e
+  colar/copiar o último. Só um agente roda por vez (o atalho avisa se já houver um). Se uma confirmação surgir no meio
+  de um ditado, a janela espera o ditado terminar de colar antes de aparecer.
+- **Esc** durante uma gravação cancela a gravação; sem gravação, cancela o agente (inclusive os comandos que ele
+  começou).
 - A resposta final aparece numa notificação e fica no histórico marcada como **Agente** (e conta em Estatísticas).
 - Como no modo comando, dá para começar no "segurar para falar" e adicionar Shift.
 - Requer o Claude Code instalado e logado (`claude` no PATH ou em `~/.local/bin/claude`) e, para o navegador, a
   extensão Claude in Chrome conectada. Sem o Claude Code, o atalho só mostra um aviso.
 - Em **Configurações → IA → Modo agente**: liga/desliga (vem ligado se o `claude` for encontrado), caminho do
   binário e tempo máximo de cada etapa (padrão 10 min).
-- Por baixo, o app roda `claude -p` sem shell, com `--permission-mode acceptEdits` e só o navegador, o terminal e as
-  ferramentas de arquivos/web pré-aprovados (nunca `--dangerously-skip-permissions`). A confirmação é uma regra do
-  prompt do agente, conferida pelo app: revise o que ele pede para confirmar.
+- Por baixo, o app roda `claude -p` sem shell, num grupo de processos próprio (cancelar ou estourar o tempo encerra
+  o `claude` e tudo o que ele abriu). Só ferramentas de leitura são pré-aprovadas; as que alteram algo passam por um
+  hook `PreToolUse` (`app/native/agent_hook.js`) que pergunta ao app por um socket Unix privado (pasta 0700, socket
+  0600) e, se o app não responder, recusa. Com `--setting-sources ""`, as permissões do seu `~/.claude/settings.json`
+  (`permissions.allow`, `defaultMode`) e os hooks e configurações do projeto não valem para o agente; o login da
+  conta continua funcionando (fica fora desses arquivos). Nunca `--dangerously-skip-permissions`.
 
 ### Notas
 
@@ -200,9 +212,10 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 - **Modo comando** (ponto lilás), **nota** (ponto laranja) e **mãos livres** (cadeado).
 - **Processando**: três pontinhos.
 - **Reunião gravando**: ponto vermelho.
-- **Modo agente**: a pílula inteira fica vermelha enquanto grava; enquanto o agente trabalha, pílula preta com borda e
-  pontinhos vermelhos; aguardando confirmação, a borda pulsa e aparece "Confirme no DronsioFlow". O vermelho da
-  reunião é só um ponto ao lado da barra parada, então os dois não se confundem.
+- **Modo agente**: a pílula inteira fica vermelha: com ondas enquanto grava a tarefa, com pontinhos claros enquanto o
+  agente trabalha e com a borda pulsando e "Confirme no DronsioFlow" aguardando confirmação. Um ditado durante o
+  agente usa a barra normal e, ao terminar, ela volta ao vermelho. O vermelho da reunião é só um ponto ao lado da
+  barra parada, então os dois não se confundem.
 
 ### Janela e interface
 
@@ -283,7 +296,8 @@ ditado. Se nenhum microfone enviar áudio, um aviso explica o que fazer.
 app/main.js                 processo principal (Electron): atalhos, gravação, IA, histórico, janelas
 app/lib/llm.js              prompts e chamadas ao Ollama (com proteção de memória)
 app/lib/textproc.js         dicionário, snippets e remoção de hesitações sem IA
-app/lib/agent.js            modo agente: roda o Claude Code (claude -p) e detecta pedidos de confirmação
+app/lib/agent.js            modo agente: roda o Claude Code (claude -p), socket de confirmação e política das ferramentas
+app/native/agent_hook.js    hook PreToolUse do modo agente: pergunta ao app se a ferramenta pode rodar
 app/native/input_helper.py  lê teclado/mouse (evdev) e cola (wl-copy/xclip + tecla simulada via uinput)
 app/native/transcriber.py   motor Whisper local (baixa o modelo do Hugging Face na 1ª vez)
 app/ui/                     interface (páginas, modais, tema claro/escuro e a barra flutuante)
@@ -307,8 +321,9 @@ Depois de editar algo em `app/`, rode `./install.sh` de novo e reinicie o app.
 - `tools/bench_llm.mjs`: compara modelos do Ollama nos prompts reais do app.
 - `tools/press_keys.py`: simula um atalho por um teclado virtual.
 - `tools/make_sounds.py`: gera os sons de início/fim.
-- `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:` e a execução/cancelamento do
-  agente com um `claude` falso.
+- `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:`, a política das ferramentas, o
+  hook de confirmação de ponta a ponta (com um `claude` falso que chama o hook real) e o cancelamento/tempo esgotado
+  do grupo de processos.
 - Variáveis de ambiente: `DRONSIO_TEST_WAV=arquivo.wav` (usa o arquivo no lugar do microfone),
   `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico),
   `DRONSIO_TEST_AGENT_TEXT="tarefa"` (no modo agente, usa esse texto no lugar da transcrição), `DRONSIO_USER_NAME` (nome na saudação),
