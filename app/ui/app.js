@@ -11,6 +11,7 @@ const ui = {
   searchOpen: {},
   note: null, // id of the note open in the editor
   meeting: null, // id of the meeting open
+  openActions: new Set(), // history entries (by date) with the agent's action list expanded
   pendingRender: false,
 };
 
@@ -154,7 +155,7 @@ function historyGroups(items, page) {
         .map(
           (h) => `<div class="row">
             <span class="time">${timeLabel(h.at)}</span>
-            <div class="body">${KIND[h.kind] ? `<span class="kind ${h.kind}">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p></div>
+            <div class="body">${KIND[h.kind] ? `<span class="kind ${h.kind}">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p>${agentActions(h)}</div>
             <div class="actions">
               <button class="icon-btn small" data-act="copy" data-text="${esc(h.text)}" title="Copiar">${icon("copy", 16)}</button>
               <button class="icon-btn small" data-act="delete-history" data-arg="${esc(h.at)}" title="Apagar">${icon("trash", 16)}</button>
@@ -164,6 +165,16 @@ function historyGroups(items, page) {
         .join("")}</div>`,
     )
     .join("");
+}
+
+/** The agent's actions in its history entry: a toggle, and the list of commands, files and browser actions. */
+function agentActions(h) {
+  if (h.kind !== "agent" || !h.actions?.length) return "";
+  const open = ui.openActions.has(h.at);
+  const auto = h.actions.filter((a) => a.how === "auto").length;
+  const label = `${h.actions.length} ${h.actions.length === 1 ? "ação" : "ações"} (${auto} ${auto === 1 ? "automática" : "automáticas"})`;
+  return `<button class="actions-toggle" data-act="toggle-actions" data-arg="${esc(h.at)}" aria-expanded="${open}">${icon("arrow", 12)}${label}</button>
+    ${open ? `<ol class="agent-actions">${h.actions.map((a) => `<li class="${a.how}"><span class="tag">${a.tool === "Bash" ? "terminal" : a.tool.startsWith("mcp__claude-in-chrome__") ? "navegador" : "arquivo"}${a.how === "confirmed" ? " · confirmada" : ""}</span><code>${esc(a.text)}</code></li>`).join("")}</ol>` : ""}`;
 }
 
 function pageHome() {
@@ -457,7 +468,7 @@ const SHORTCUTS = [
   ["handsFree", "Mãos livres", "Aperte para começar e de novo para terminar."],
   ["command", "Modo comando", "Com texto selecionado: diga o que fazer com ele. Sem seleção: peça algo."],
   ["note", "Nota por voz", "Dita uma nota que vai para Notas, sem colar."],
-  ["agent", "Modo agente", "Fale uma tarefa e o Claude Code a executa no computador. Cada ação que altera algo pede confirmação; Esc cancela. Os outros atalhos seguem funcionando enquanto ele trabalha."],
+  ["agent", "Modo agente", "Fale uma tarefa e o Claude Code a executa no computador. Ações arriscadas e envios pedem confirmação; Esc cancela. Os outros atalhos seguem funcionando enquanto ele trabalha."],
   ["pasteLast", "Colar o último ditado", "Cola de novo a última transcrição."],
   ["copyLast", "Copiar o último ditado", "Copia a última transcrição."],
 ];
@@ -540,7 +551,7 @@ function agentSettings() {
     : `Claude Code não encontrado (nem no PATH, nem em ~/.local/bin/claude). Instale em <a href="https://claude.com/claude-code" target="_blank">claude.com/claude-code</a> e faça login com <code>claude</code>.`;
   return `<div class="group-title">Modo agente</div>
     <div class="group">
-      <div class="item"><div><h4>Modo agente (Claude Code)</h4><p>${settings.shortcuts.agent?.length ? `Segure ${keysHtml(settings.shortcuts.agent, { soft: true })}` : "Com um atalho definido, segure-o"}, fale uma tarefa e o Claude Code a executa no computador e no navegador. Antes de cada ação que altera algo (comando, arquivo, clique ou digitação), o DronsioFlow mostra a ação exata e só a deixa executar se você confirmar.</p>
+      <div class="item"><div><h4>Modo agente (Claude Code)</h4><p>${settings.shortcuts.agent?.length ? `Segure ${keysHtml(settings.shortcuts.agent, { soft: true })}` : "Com um atalho definido, segure-o"}, fale uma tarefa e o Claude Code a executa no computador e no navegador. ${a.confirmAll ? "Antes de cada ação que altera algo (comando, arquivo, clique ou digitação), o DronsioFlow mostra a ação exata e só a deixa executar se você confirmar." : "Ele age sozinho dentro dos limites de Autonomia do agente, abaixo; o que é arriscado espera a sua confirmação."}</p>
         ${bin ? "" : `<p class="warn">${missing}</p>`}
         ${settings.shortcuts.agent?.length ? "" : `<p class="warn">Sem atalho: Ctrl + Super + Shift já é usado por outra ação. Escolha um em Configurações → Atalhos.</p>`}</div><div class="control">${sw(on, 'data-agent="enabled"')}</div></div>
       <div class="item"><div><h4>Caminho do Claude Code</h4><p>${bin ? `Usando <code>${esc(bin)}</code>.` : "Não encontrado."} Em branco: <code>claude</code> do PATH ou ~/.local/bin/claude.</p></div>
@@ -548,6 +559,20 @@ function agentSettings() {
       <div class="item"><div><h4>Tempo máximo</h4><p>Por etapa do agente; passado o limite, ele é interrompido.</p></div>
         <div class="control"><select class="select" data-agent-select="timeoutMin">${optionList([5, 10, 20, 30, 60].map((m) => [String(m), `${m} min`]), String(a.timeoutMin))}</select></div></div>
     </div>
+    <div class="group-title">Autonomia do agente</div>
+    <div class="group">
+      <div class="item"><div><h4>Confirmar tudo</h4><p>Desligado, o agente navega, clica, digita, roda comandos comuns e grava arquivos nas pastas de trabalho sozinho, e só pede confirmação para o que é arriscado. Ligado, toda ação que altera algo espera a sua confirmação.</p></div>
+        <div class="control">${sw(a.confirmAll, 'data-agent="confirmAll"')}</div></div>
+      <div class="item stack"><div><h4>Pastas de trabalho</h4><p>Onde o agente cria e edita arquivos sem perguntar. Arquivos ocultos da sua pasta pessoal (como ~/.bashrc) pedem confirmação mesmo aqui. Pastas sensíveis ou amplas demais (a pasta pessoal inteira, /, /etc, /usr) não são aceitas.</p>
+        <div class="agent-list">${a.workDirs.map((d, i) => `<div class="entry"><code>${esc(d)}</code>${S.agentWorkDirProblems?.[i] ? `<span class="warn">ignorada: ${esc(S.agentWorkDirProblems[i])}</span>` : ""}<button class="btn ghost small" data-act="remove-work-dir" data-arg="${i}">Remover</button></div>`).join("") || `<p class="muted">Nenhuma pasta: toda gravação de arquivo pede confirmação.</p>`}</div></div>
+        <div class="control"><button class="btn secondary" data-act="add-work-dir">Adicionar pasta</button></div></div>
+      <div class="item stack"><div><h4>Comandos que pedem confirmação</h4><p>Estas regras são fixas:</p>
+        <dl class="rules">${(S.agentRules || []).map((r) => `<dt>${esc(r.title)}</dt><dd>${esc(r.items.join(", "))}</dd>`).join("")}</dl>
+        <p style="margin-top:12px">E também estes, que você pode mudar (o começo do comando; * no fim vale qualquer continuação, ex.: <code>make deploy*</code>):</p>
+        <div class="agent-list">${a.confirmPatterns.map((p, i) => `<div class="entry"><code>${esc(p)}</code><button class="btn ghost small" data-act="remove-pattern" data-arg="${i}">Remover</button></div>`).join("")}</div>
+        <form class="pattern-form" data-form="addPattern"><input class="input" id="f-pattern" placeholder="Ex.: terraform apply" spellcheck="false" /><button class="btn secondary" type="submit">Adicionar</button></form></div></div>
+    </div>
+    <p class="muted" style="margin-bottom:8px">Enviar mensagens, publicar e comprar no navegador dependem de o agente parar e pedir confirmação, como manda a instrução dele: não é uma garantia. A lista de comandos reduz o risco, mas não cobre tudo.</p>
     <p class="muted">A instrução falada (já transcrita) e o conteúdo das páginas e arquivos que o agente abre vão para a sua conta Claude. O áudio continua só no computador.</p>`;
 }
 
@@ -560,6 +585,7 @@ function renderModal() {
   if (confirming) {
     html = `<div class="modal confirm"><h2>Confirmar ação do agente</h2><p class="lead">${esc(action.title)}:</p>
       <div class="confirm-action">${esc(action.detail)}</div>
+      ${action.why ? `<p class="confirm-why">Pede confirmação porque ${esc(action.why)}.</p>` : ""}
       <p class="muted">Confira os detalhes antes de confirmar. Se cancelar, nada é executado.</p>
       <div class="foot"><button class="btn secondary" data-act="agent-confirm" data-arg="${esc(action.id)}:0">Cancelar</button><button class="btn danger" data-act="agent-confirm" data-arg="${esc(action.id)}:1">Confirmar</button></div></div>`;
   } else if (capture) {
@@ -758,6 +784,17 @@ const ACTIONS = {
     const [id, ok] = arg.split(":");
     if (ok !== "1" || Date.now() - ui.confirmShownAt > 600) api.agentConfirm(id, ok === "1");
   },
+  "toggle-actions": (at) => {
+    if (!ui.openActions.delete(at)) ui.openActions.add(at);
+    render();
+  },
+  "add-work-dir": async () => {
+    const r = await api.pickWorkDir();
+    if (r?.error) return toast(r.error);
+    if (r?.dir && !S.settings.agent.workDirs.includes(r.dir)) setAgent({ workDirs: [...S.settings.agent.workDirs, r.dir] });
+  },
+  "remove-work-dir": (i) => setAgent({ workDirs: S.settings.agent.workDirs.filter((_, j) => j !== Number(i)) }),
+  "remove-pattern": (i) => setAgent({ confirmPatterns: S.settings.agent.confirmPatterns.filter((_, j) => j !== Number(i)) }),
   "refresh-ollama": () => api.refreshOllama(),
   "open-folder": () => api.openFolder(),
   quit: () => api.quit(),
@@ -817,6 +854,13 @@ document.addEventListener("submit", (ev) => {
   const form = ev.target.closest("[data-form]");
   if (!form) return;
   ev.preventDefault();
+  // inside the settings modal: keep it open
+  if (form.dataset.form === "addPattern") {
+    const pattern = $("#f-pattern").value.trim().replace(/\s+/g, " ");
+    if (pattern && !S.settings.agent.confirmPatterns.includes(pattern)) setAgent({ confirmPatterns: [...S.settings.agent.confirmPatterns, pattern] });
+    $("#f-pattern").value = "";
+    return;
+  }
   if (form.dataset.form === "addWord") {
     const term = $("#f-term").value.trim();
     if (term) api.setSettings({ dictionary: [...S.settings.dictionary, { term, heardAs: $("#f-heard").value.trim() }] });

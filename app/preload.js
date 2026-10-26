@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld("dronsio", {
   deleteNote: invoke("delete-note"),
   agentConfirm: invoke("agent-confirm"),
   cancelAgent: invoke("cancel-agent"),
+  pickWorkDir: invoke("pick-work-dir"),
   startMeeting: invoke("start-meeting"),
   stopMeeting: invoke("stop-meeting"),
   deleteMeeting: invoke("delete-meeting"),
