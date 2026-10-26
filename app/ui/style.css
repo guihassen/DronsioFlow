@@ -211,6 +211,7 @@ h1, h2, h3, p { margin: 0; }
 .agent-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .agent-list .entry { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--panel); border-radius: 8px; padding: 2px 4px 2px 10px; }
 .group .item .agent-list .btn { min-width: 0; }
+.agent-list .entry .warn { flex: 1; color: var(--danger); font-size: 13px; line-height: 1.35; }
 .rules { margin: 6px 0 0; font-size: 13px; color: var(--text-2); display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; }
 .rules dt { font-weight: 600; }
 .rules dd { margin: 0; }

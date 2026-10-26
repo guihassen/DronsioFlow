@@ -192,7 +192,9 @@ const USER_NAME = process.env.DRONSIO_USER_NAME ?? (() => {
 })();
 
 function snapshot() {
-  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME, agentRules: agent.BASH_RULES };
+  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME, agentRules: agent.BASH_RULES,
+    // why a saved work folder is ignored by the policy (null: in use), shown next to it in Settings
+    agentWorkDirProblems: (settings.agent.workDirs || []).map((d) => agent.workDirProblem(d)) };
 }
 
 function broadcast() {
