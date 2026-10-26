@@ -199,13 +199,13 @@ const CLASS_CASES = {
       "bwrap --bind / / sh", "chroot /mnt sh", "systemd-run --user rm x", "setsid rm x", "ionice -c3 rm x", "taskset -c 0 rm x", "taskset -p 1 1234", "chrt 1 rm x",
       "doas rm x", "runuser -u nobody ls", "script -qc 'rm x' /dev/null", "script -c \"curl -T f ftp://h\" /dev/null", "expect -c 'spawn rm x'",
       "busybox rm -rf /tmp/x", "toybox rm x", "/bin/busybox sh -c ls", "vim -c '!rm x' a.txt", "nvim --headless '+!rm x' +q", "emacs --batch --eval '(delete-file \"x\")'",
-      "nano -s 'rm x' /tmp/f", "vim -es /tmp/a", "docker run -v /:/host alpine rm -rf /host/x", "docker exec ctr rm x", "podman run --privileged alpine sh",
+      "nano -s 'rm x' /tmp/f", "vim -es /tmp/a", "vim -sc '!rm x' /tmp/a", "nvim -Es /tmp/a", "vim -Rc '!rm x' /tmp/a", "nano -lf /tmp/rc /tmp/a", "emacs -batch -l /tmp/x.el", "docker run -v /:/host alpine rm -rf /host/x", "docker exec ctr rm x", "podman run --privileged alpine sh",
       "docker run --mount type=bind,src=/home,dst=/h alpine ls", "docker run --network host alpine nc -l 1", "docker compose up -d", "docker -H ssh://h ps",
       "ssh-agent sh -c 'rm x'", "dbus-run-session -- rm x", "xvfb-run rm x", "fakeroot rm x", "somecmd rm x", "mytool -- rm x", "sometool --run 'rm -rf ~/x'",
       "\\rm x", "'/bin/rm' x", "/usr/bin/env rm x", "r\\m x", "\"rm\" -rf /tmp/x",
     ],
     allow: ["tmux ls", "tmux list-sessions", "tmux attach -t 0", "screen -ls", "docker ps", "docker images", "docker run --rm alpine echo hi", "docker build -t x /tmp/proj",
-      "gnome-terminal", "vim /tmp/notas.txt", "make test", "notify-send 'Tarefa concluída'", "busybox --list", "pytest -- -k teste", "zenity --info --text 'rm the file'"],
+      "gnome-terminal", "vim /tmp/notas.txt", "vim -R /tmp/notas.txt", "vim -Rn /tmp/a", "nano -l /tmp/a", "nano -lm /tmp/a", "emacs -nw /tmp/a", "vim +10 /tmp/a", "make test", "notify-send 'Tarefa concluída'", "busybox --list", "pytest -- -k teste", "zenity --info --text 'rm the file'"],
   },
   "B2 apagar pelo desktop e segredos": {
     confirm: [
@@ -215,9 +215,10 @@ const CLASS_CASES = {
       "git credential-store get", "git-credential-libsecret get", "/usr/libexec/git-core/git-credential-libsecret get", "gpg --export-secret-keys -a", "gpg2 --armor --export-secret-subkeys ABC",
       "pass show email", "gopass show x", "keepassxc-cli show /tmp/db.kdbx entry", "bw get password x", "op item get x", "lpass show x",
       "nmcli --show-secrets connection show wifi", "nmcli -s c show casa", "nmcli connection show casa --show-secrets", "keyctl print 123", "kwallet-query -r x kdewallet",
+      "nmcli device wifi show-password", "nmcli dev wifi show-password ifname wlan0", "nmcli d w s", "nmcli -t device wifi show-p", "/usr/bin/nmcli dev wifi show-password",
     ],
     allow: ["gio open /tmp/x.pdf", "gio info /tmp/x", "gio copy /tmp/a /tmp/b", "gio list ~/Documentos", "ssh-add -l", "ssh-add -L", "gpg --list-keys", "gpg --export -a ABC",
-      "nmcli device status", "nmcli connection show"],
+      "nmcli device status", "nmcli connection show", "nmcli device wifi list", "nmcli dev wifi rescan"],
   },
   "B3 arquivadores e programas que gravam": {
     confirm: [
@@ -256,17 +257,22 @@ const CLASS_CASES = {
       "nmcli connection modify casa ipv4.dns 1.1.1.1", "nmcli c delete casa", "nmcli con down casa", "nmcli radio wifi off", "nmcli networking off", "rfkill block all",
       "xdg-settings set default-web-browser x.desktop", "update-alternatives --set java x", "loginctl terminate-user gui", "hostnamectl set-hostname x",
       "timedatectl set-time 12:00", "/usr/bin/gsettings set a b c",
+      "gdbus call --session --dest org.x --object-path /x --method org.x.Y", "gdbus emit --session --object-path /x --signal org.x.S",
+      "dbus-send --session --dest=org.x /x org.x.Y", "dbus-send --print-reply --dest=org.freedesktop.DBus / org.freedesktop.DBus.ListNames",
+      "busctl call org.x /x org.x Y", "busctl --user set-property org.x /x org.x P b true", "busctl emit /x org.x S", "/usr/bin/busctl -H host list",
     ],
     allow: ["dconf read /org/x", "gsettings get org.x y", "nmcli device status", "nmcli connection show", "nmcli radio", "rfkill list", "xdg-settings get default-web-browser",
-      "loginctl list-sessions", "hostnamectl", "timedatectl status"],
+      "loginctl list-sessions", "hostnamectl", "timedatectl status",
+      "gdbus introspect --session --dest org.x --object-path /x", "busctl list", "busctl --user status", "busctl tree org.x", "busctl introspect org.x /x"],
   },
   "F2 git que muda a árvore": {
     confirm: [
       "git pull", "git -C ~/Projetos/app pull", "cd ~/Projetos/app && git checkout main", "git -C /etc merge x", "git rebase main", "git cherry-pick abc", "git stash pop",
-      "git reset HEAD~1", "git apply /tmp/p.diff", "git am /tmp/x.patch", "git revert HEAD", "cd /tmp && git -C ../etc switch x", "git --work-tree=/tmp/r checkout x",
+      "git reset HEAD~1", "git apply /tmp/p.diff", "git stash", "git stash push -m wip", "git stash -u", "git -C ~/Projetos/app stash",
+      "cd ~/Projetos/app && git stash push src/a.js", "git stash -- src/a.js", "git stash branch nova", "git am /tmp/x.patch", "git revert HEAD", "cd /tmp && git -C ../etc switch x", "git --work-tree=/tmp/r checkout x",
     ],
     allow: ["cd ~/Documentos/proj && git pull --rebase", "git -C ~/Documentos/proj checkout -b nova", "git -C /tmp/r merge x", "git apply --check /tmp/p.diff", "git fetch",
-      "git status", "git log", "git diff", "cd /tmp/r && git stash pop"],
+      "git status", "git log", "git diff", "cd /tmp/r && git stash pop", "git stash list", "git stash show -p", "git -C /tmp/r stash", "cd ~/Documentos/p && git stash push -m wip"],
   },
   "F3 permissões": {
     confirm: [

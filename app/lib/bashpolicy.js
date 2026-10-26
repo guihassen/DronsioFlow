@@ -58,9 +58,9 @@ const PYTHON_MODULES = new Set(["json.tool", "venv", "pytest", "unittest", "py_c
 
 const RULES = [
   { title: "Apagar", items: [...DELETE.filter((n) => !n.startsWith("trash") && n !== "kde-rm"), "lixeira (gio trash/remove, trash-put, trash-empty, kioclient)", "find -delete / -exec rm", "git clean", "git reset --hard", "git checkout -- / git restore", "git branch -D", "git stash drop/clear", "git rm", "rsync --delete", "tar --remove-files, zip -m", "mv de fora das pastas de trabalho"] },
-  { title: "Sistema", items: ["sudo, su, pkexec, doas, runuser", "instalar ou remover pacotes (dnf, apt, rpm, flatpak, snap, pip, npm -g, cargo…)", "systemctl, service", "kill, pkill, killall", "reboot, shutdown", "dd, mkfs, fdisk, parted, mount", "chmod/setfacl fora das pastas, chmod -R, chown", "crontab", "dconf, gsettings set, xdg-settings set", "nmcli connection modify/delete/down, radio, rfkill", "loginctl, hostnamectl, timedatectl, update-alternatives", "unshare, nsenter, chroot", "git apply/merge/pull/rebase/checkout… fora das pastas", "cp/mv/tee/sed -i/sort -o/convert gravando fora das pastas de trabalho"] },
+  { title: "Sistema", items: ["sudo, su, pkexec, doas, runuser", "instalar ou remover pacotes (dnf, apt, rpm, flatpak, snap, pip, npm -g, cargo…)", "systemctl, service", "kill, pkill, killall", "reboot, shutdown", "dd, mkfs, fdisk, parted, mount", "chmod/setfacl fora das pastas, chmod -R, chown", "crontab", "dconf, gsettings set, xdg-settings set", "nmcli connection modify/delete/down, radio, rfkill", "loginctl, hostnamectl, timedatectl, update-alternatives", "dbus-send, gdbus call/emit, busctl call/set-property", "unshare, nsenter, chroot", "git apply/merge/pull/rebase/checkout… fora das pastas", "cp/mv/tee/sed -i/sort -o/convert gravando fora das pastas de trabalho"] },
   { title: "Publicar ou enviar", items: ["git push", "gh (exceto consultas)", "ssh, scp, sftp", "rsync para outro computador", "curl enviando dados (-d, -F, -T, -X POST…)", "wget --post", "nc, ncat, socat", "mail, sendmail", "servidores (python -m http.server, php -S, http-server, serve, busybox httpd, ruby -run)"] },
-  { title: "Segredos", items: ["secret-tool, keyctl, kwallet-query", "git credential", "gpg --export-secret-keys", "pass, gopass, keepassxc-cli, bw, op, lpass", "nmcli --show-secrets", "printenv, env, set, export -p, declare -p (mostram tokens do ambiente)"] },
+  { title: "Segredos", items: ["secret-tool, keyctl, kwallet-query", "git credential", "gpg --export-secret-keys", "pass, gopass, keepassxc-cli, bw, op, lpass", "nmcli --show-secrets, nmcli device wifi show-password", "printenv, env, set, export -p, declare -p (mostram tokens do ambiente)"] },
   { title: "Brechas", items: ["código inline (bash -c, python -c, node -e…)", "pipe ou entrada para um interpretador", "$(…) e crases", "rodar um arquivo criado ou alterado nesta tarefa", "programas que rodam outro comando (xargs, tmux, terminais, strace, gdb, docker exec, vim -c, busybox…) com um comando da lista", "eval, alias, function, source de fora das pastas", "npx e parecidos", "caminhos sensíveis (~/.ssh, .env, ~/.config…), também por curinga ou variável", "> ou >> para fora das pastas de trabalho", "variáveis como PATH e LD_PRELOAD"] },
 ];
 
@@ -442,7 +442,11 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
     return from >= 0 && from < args.length ? runInner(args.slice(from)) : null;
   }
   if (EDITORS.includes(name)) {
-    const runs = args.some((w) => /^(-c|--cmd|-S|-s|-e|-es|-E|-Es|-u|-U|-x|-y|-l|--load|--eval|-eval|-f|--funcall|-batch|--batch|--script|--remote-send|--remote-expr|--speller|--rcfile|-plugin)$/.test(w.text) || /^(--(eval|load|funcall|cmd|remote-send|remote-expr|speller|rcfile)=)/.test(w.text) || /^\+[^\d/?]/.test(w.text));
+    // nano's short options are mostly display ones (-l numbers lines): only -s (speller) and -f (rcfile) run something
+    const nano = name === "nano";
+    const single = nano ? /^(-s|-f|--speller|--rcfile)$/ : /^(-c|--cmd|-S|-s|-e|-es|-E|-Es|-u|-U|-x|-y|-l|--load|--eval|-eval|-f|--funcall|-batch|--batch|--script|--remote-send|--remote-expr|--speller|--rcfile|-plugin)$/;
+    const letters = nano ? "sf" : "cSseEuUxyl";
+    const runs = args.some((w) => single.test(w.text) || /^(--(eval|load|funcall|cmd|remote-send|remote-expr|speller|rcfile)=)/.test(w.text) || (!nano && /^\+[^\d/?]/.test(w.text)) || (/^-[A-Za-z]{2,}$/.test(w.text) && [...w.text.slice(1)].some((ch) => letters.includes(ch))));
     return runs ? confirm(`${name} com comandos na linha de comando`) : null;
   }
 
@@ -554,12 +558,22 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
       if (hasFlag(args, ["--show-secrets"], "s")) return confirm("nmcli --show-secrets mostra senhas de rede");
       const [obj, verb, ...more] = operands(args, ["-f", "--fields", "-g", "--get-values", "-m", "--mode", "-c", "--colors", "-e", "--escape", "-w", "--wait"]).map((w) => w.text);
       const is = (word, full) => word && full.startsWith(word);
+      if (is(obj, "device") && is(verb, "wifi") && is(more[0], "show-password")) return confirm("nmcli device wifi show-password mostra a senha do Wi-Fi");
       if (is(obj, "connection") && (["modify", "delete", "down", "up", "add", "edit", "clone", "import", "load", "reload"].some((v) => is(verb, v)) || (is(verb, "show") && more.some((x) => x === "-s" || x === "--show-secrets"))))
         return confirm(`nmcli connection ${verb} altera a rede`);
       if (is(obj, "radio") && more.concat(verb ? [verb] : []).some((x) => x === "on" || x === "off")) return confirm("nmcli radio liga ou desliga o rádio");
       if ((is(obj, "networking") && ["on", "off"].includes(verb)) || (is(obj, "general") && ["hostname", "logging", "reload"].some((v) => is(verb, v)) && more.length) || (is(obj, "device") && ["set", "connect", "disconnect", "delete", "modify", "reapply", "up", "down"].some((v) => is(verb, v))) || (is(obj, "device") && is(verb, "wifi") && ["connect", "hotspot"].some((v) => is(more[0], v))))
         return confirm(`nmcli ${obj} ${verb} altera a rede`);
       return null;
+    }
+    case "gdbus":
+      return ["call", "emit"].includes(args[0]?.text) ? confirm(`gdbus ${args[0].text} manda uma mensagem a outro programa`) : null;
+    case "dbus-send":
+      return confirm("dbus-send manda uma mensagem a outro programa");
+    case "busctl": {
+      const verb = operands(args, ["-H", "--host", "-M", "--machine", "--destination", "--match", "--size", "--timeout", "--json", "--augment-creds"])[0]?.text;
+      if (hasFlag(args, ["--host"], "H")) return confirm("busctl em outro computador");
+      return ["call", "set-property", "emit", "wait"].includes(verb) ? confirm(`busctl ${verb} manda uma mensagem a outro programa`) : null;
     }
     case "dconf":
       return ["write", "reset", "load", "update", "compile"].includes(args[0]?.text) ? confirm(`dconf ${args[0].text} altera as configurações`) : null;
@@ -944,7 +958,7 @@ function checkGit(args, chk, ctx) {
   const has = (...f) => rest.some((w) => f.includes(w.text));
   if (verb === "credential" || verb?.startsWith("credential-")) return confirm("git credential lê ou grava senhas");
   // commands that rewrite the files of the working tree: only inside the work folders
-  const changesTree = ["apply", "am", "checkout", "switch", "merge", "pull", "rebase", "cherry-pick", "revert", "reset"].includes(verb) || (verb === "stash" && ["pop", "apply"].includes(rest[0]?.text));
+  const changesTree = ["apply", "am", "checkout", "switch", "merge", "pull", "rebase", "cherry-pick", "revert", "reset"].includes(verb) || (verb === "stash" && !["list", "show", "create", "store", "drop", "clear"].includes(operands(rest, ["-m", "--message", "--pathspec-from-file"])[0]?.text)); // stash (push), pop, apply, branch
   if (changesTree && !(verb === "apply" && has("--check", "--stat", "--numstat", "--summary"))) {
     if (!where) return confirm(`git ${verb} muda arquivos numa pasta que o app não conhece`);
     if (!ctx.isWorkPath(where)) return confirm(`git ${verb} muda arquivos fora das pastas de trabalho (${where})`);
