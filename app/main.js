@@ -1,5 +1,5 @@
 // DronsioFlow — free, local voice dictation for Linux.
-const { app, BrowserWindow, ipcMain, screen, clipboard, Tray, Menu, nativeImage, shell, Notification, nativeTheme } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, clipboard, Tray, Menu, nativeImage, shell, Notification, nativeTheme, dialog } = require("electron");
 const { spawn, execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -76,6 +76,9 @@ const DEFAULT_SETTINGS = {
     enabled: null, // null: on when the claude binary is found
     bin: "", // empty: `claude` on PATH, else ~/.local/bin/claude
     timeoutMin: 10, // per claude run
+    confirmAll: false, // true: every action that changes something asks (no autonomy)
+    workDirs: agent.DEFAULT_WORK_DIRS, // where files may be written without asking
+    confirmPatterns: agent.DEFAULT_CONFIRM_PATTERNS, // extra commands that ask, besides the fixed rules
   },
   polishPresets: llm.DEFAULT_POLISH_PRESETS,
   meetingSystemAudio: true,
@@ -127,6 +130,11 @@ function mergeDefaults(saved) {
       .filter((e) => e.term);
   }
   delete merged.vocabulary;
+  // the agent's lists come from the UI: keep only distinct, non-empty strings
+  for (const key of ["workDirs", "confirmPatterns"]) {
+    const list = merged.agent[key];
+    merged.agent[key] = Array.isArray(list) ? [...new Set(list.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()))] : DEFAULT_SETTINGS.agent[key];
+  }
   // The agent shortcut came after people saved their own: it gets the default only if no other
   // action (transforms included) already uses those keys; otherwise it starts without a shortcut.
   if (saved.shortcuts && !("agent" in saved.shortcuts)) {
@@ -184,7 +192,7 @@ const USER_NAME = process.env.DRONSIO_USER_NAME ?? (() => {
 })();
 
 function snapshot() {
-  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME };
+  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME, agentRules: agent.BASH_RULES };
 }
 
 function broadcast() {
@@ -789,7 +797,10 @@ async function stopRecording() {
   const duration = Date.now() - recordingStartedAt;
   const mode = state.mode;
   // claimed before the first await, so Esc can cancel the task while it is still being transcribed
-  const job = mode === "agent" ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve() }) : null;
+  const job =
+    mode === "agent"
+      ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve(), since: Date.now(), written: new Set(), actions: [] })
+      : null;
   let agentStarted = false; // from then on the job outlives this recording
   const recorded = await endRecorder();
   playSound("stop");
@@ -981,24 +992,52 @@ function askConfirmation(job, action, closed) {
   return answer;
 }
 
-/** The PreToolUse hook's question: read-only calls pass, the rest waits for the user. */
+const agentPolicyOptions = (job) => ({
+  confirmAll: settings.agent.confirmAll,
+  workDirs: settings.agent.workDirs,
+  extraPatterns: settings.agent.confirmPatterns,
+  written: job.written,
+  since: job.since,
+});
+
+/** Keeps what an allowed call did: its line in the history entry, and the files it wrote. */
+function recordAction(job, call, how) {
+  for (const p of agent.writtenPaths(call.tool_name, call.tool_input, agentPolicyOptions(job))) job.written.add(p);
+  const line = agent.describeAction(call.tool_name, call.tool_input);
+  if (line && job.actions.length < 300) job.actions.push({ ...line, how });
+}
+
+/** The PreToolUse hook's question: the policy lets reading and low-risk changes through, the rest waits for the user. */
 async function agentPermission(job, call, closed) {
   if (job.cancelled) return false;
-  const policy = agent.toolPolicy(call.tool_name, call.tool_input);
-  if (policy === "allow") return true;
+  const options = agentPolicyOptions(job);
+  const policy = agent.toolPolicy(call.tool_name, call.tool_input, options);
+  if (policy === "allow") {
+    recordAction(job, call, "auto");
+    if (agent.describeAction(call.tool_name, call.tool_input)) logStep(`agent auto ${call.tool_name}`);
+    return true;
+  }
   if (policy === "deny") {
     logStep(`agent ${call.tool_name} refused: sensitive path`);
     return false;
   }
-  logStep(`agent asks to use ${call.tool_name}`);
+  // why a command asks, shown in the dialog (the fixed rules or the user's list)
+  const why = call.tool_name === "Bash" && !options.confirmAll ? agent.bashDecision(call.tool_input?.command, options).reason : null;
+  logStep(`agent asks to use ${call.tool_name}`, why ? `(${why})` : "");
   const release = job.hold?.(); // the user's time to decide doesn't count against the run's timeout
   try {
-    const ok = (await askConfirmation(job, agent.describeToolCall(call.tool_name, call.tool_input), closed)) && !job.cancelled;
+    const ok = (await askConfirmation(job, { ...agent.describeToolCall(call.tool_name, call.tool_input), why }, closed)) && !job.cancelled;
     logStep(`agent ${call.tool_name} ${ok ? "confirmed" : "declined"}`);
+    if (ok) recordAction(job, call, "confirmed");
     return ok;
   } finally {
     release?.();
   }
+}
+
+/** A cancelled or failed task still leaves its entry when it already did something. */
+function addAgentHistory(job, text, instruction, durationMs, startedAt) {
+  addHistory({ text, raw: instruction, durationMs, processingMs: Date.now() - startedAt, kind: "agent", actions: job.actions });
 }
 
 /** Starts the task in the background; the floating bar and the window follow state.agent. */
@@ -1030,6 +1069,8 @@ async function handleAgent(instruction, durationMs, job) {
         prompt: instruction,
         sessionId,
         hookSocket: server.socketPath,
+        workDirs: settings.agent.workDirs,
+        confirmAll: settings.agent.confirmAll,
         timeoutMs,
         onEvent: (e) => {
           if (e.type === "system" && e.subtype === "init") logStep(`agent session ${e.session_id}`);
@@ -1048,7 +1089,7 @@ async function handleAgent(instruction, durationMs, job) {
         const answer = out.result.trim() || "Tarefa concluída.";
         logStep(`agent done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s chars=${answer.length}`);
         notify("Agente", answer.slice(0, 300));
-        addHistory({ text: answer, raw: instruction, durationMs, processingMs: Date.now() - startedAt, kind: "agent" });
+        addAgentHistory(job, answer, instruction, durationMs, startedAt);
         return;
       }
       if (!sessionId) throw new Error("o Claude Code não informou a sessão para continuar");
@@ -1057,6 +1098,7 @@ async function handleAgent(instruction, durationMs, job) {
         if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
         logStep("agent action declined");
         notify("Agente", `Cancelado, nada foi feito: ${action}`.slice(0, 300));
+        if (job.actions.length) addAgentHistory(job, `Envio cancelado: ${action}`, instruction, durationMs, startedAt);
         return;
       }
       logStep("agent action confirmed");
@@ -1064,9 +1106,11 @@ async function handleAgent(instruction, durationMs, job) {
   } catch (e) {
     if (e.cancelled || job.cancelled) {
       logStep("agent cancelled");
+      if (job.actions.length) addAgentHistory(job, "Cancelado no meio da tarefa.", instruction, durationMs, startedAt);
       return flash("Agente cancelado");
     }
     logStep(`agent failed: ${e.message}`);
+    if (job.actions.length) addAgentHistory(job, `Falhou: ${e.message}`, instruction, durationMs, startedAt);
     setError(`Falha no modo agente: ${e.message}`);
     notify("Falha no modo agente", e.message);
   } finally {
@@ -1472,6 +1516,16 @@ ipcMain.handle("agent-confirm", (_e, id, ok) => {
   if (state.agent.step === "confirm" && id && state.agent.action?.id === id) agentJob?.decide?.(ok === true);
 });
 ipcMain.handle("cancel-agent", () => cancelAgent());
+
+/** Folder picker for the agent's work folders; a sensitive folder (~/.ssh…) is refused. */
+ipcMain.handle("pick-work-dir", async () => {
+  const r = await dialog.showOpenDialog(mainWindow, { title: "Pasta de trabalho do agente", properties: ["openDirectory", "createDirectory"] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const dir = r.filePaths[0];
+  if (agent.sensitivity(dir, os.homedir()) === "deny") return { error: "Essa pasta guarda dados sensíveis e não pode ser uma pasta de trabalho." };
+  const home = os.homedir();
+  return { dir: dir === home || dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir };
+});
 
 ipcMain.handle("start-meeting", () => startMeeting());
 ipcMain.handle("stop-meeting", () => stopMeeting());
