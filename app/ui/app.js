@@ -11,6 +11,7 @@ const ui = {
   searchOpen: {},
   note: null, // id of the note open in the editor
   meeting: null, // id of the meeting open
+  openActions: new Set(), // history entries (by date) with the agent's action list expanded
   pendingRender: false,
 };
 
@@ -100,7 +101,8 @@ function statusLines() {
   const ai = !settings.ai.enabled ? ["wait", "IA desligada"] : aiOn ? ["ok", "IA pronta"] : ["bad", "IA indisponível"];
   const inputOk = state.input.keyboards > 0 && state.input.uinput;
   const input = inputOk ? ["ok", "Atalhos e colagem ok"] : ["bad", "Sem acesso ao teclado"];
-  return [voice, ai, input].map(([tone, label]) => `<div class="status-line"><span class="dot ${tone}"></span>${esc(label)}</div>`).join("");
+  const agent = state.agent.running ? [["active", state.agent.step === "confirm" ? "Agente aguardando confirmação" : "Agente executando…"]] : [];
+  return [voice, ...agent, ai, input].map(([tone, label]) => `<div class="status-line"><span class="dot ${tone}"></span>${esc(label)}</div>`).join("");
 }
 
 function renderShell() {
@@ -144,7 +146,7 @@ function historyGroups(items, page) {
     if (!groups.length || groups.at(-1).label !== label) groups.push({ label, items: [] });
     groups.at(-1).items.push(h);
   }
-  const KIND = { command: "Comando", polish: "Transformação", note: "Nota" };
+  const KIND = { command: "Comando", polish: "Transformação", note: "Nota", agent: "Agente" };
   return groups
     .map(
       (g, i) => `
@@ -153,7 +155,7 @@ function historyGroups(items, page) {
         .map(
           (h) => `<div class="row">
             <span class="time">${timeLabel(h.at)}</span>
-            <div class="body">${KIND[h.kind] ? `<span class="kind">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p></div>
+            <div class="body">${KIND[h.kind] ? `<span class="kind ${h.kind}">${esc(h.preset ? `${KIND[h.kind]} · ${h.preset}` : KIND[h.kind])}</span>` : ""}<p>${esc(h.text)}</p>${agentActions(h)}</div>
             <div class="actions">
               <button class="icon-btn small" data-act="copy" data-text="${esc(h.text)}" title="Copiar">${icon("copy", 16)}</button>
               <button class="icon-btn small" data-act="delete-history" data-arg="${esc(h.at)}" title="Apagar">${icon("trash", 16)}</button>
@@ -163,6 +165,16 @@ function historyGroups(items, page) {
         .join("")}</div>`,
     )
     .join("");
+}
+
+/** The agent's actions in its history entry: a toggle, and the list of commands, files and browser actions. */
+function agentActions(h) {
+  if (h.kind !== "agent" || !h.actions?.length) return "";
+  const open = ui.openActions.has(h.at);
+  const auto = h.actions.filter((a) => a.how === "auto").length;
+  const label = `${h.actions.length} ${h.actions.length === 1 ? "ação" : "ações"} (${auto} ${auto === 1 ? "automática" : "automáticas"})`;
+  return `<button class="actions-toggle" data-act="toggle-actions" data-arg="${esc(h.at)}" aria-expanded="${open}">${icon("arrow", 12)}${label}</button>
+    ${open ? `<ol class="agent-actions">${h.actions.map((a) => `<li class="${a.how}"><span class="tag">${a.tool === "Bash" ? "terminal" : a.tool.startsWith("mcp__claude-in-chrome__") ? "navegador" : "arquivo"}${a.how === "confirmed" ? " · confirmada" : ""}</span><code>${esc(a.text)}</code></li>`).join("")}</ol>` : ""}`;
 }
 
 function pageHome() {
@@ -266,7 +278,7 @@ function pageInsights() {
     d.setDate(d.getDate() - i);
     days.push({ key: d.toDateString(), label: d.toLocaleDateString("pt-BR", { day: "2-digit" }), words: 0, today: i === 0 });
   }
-  const byKind = { dictation: 0, command: 0, note: 0, polish: 0 };
+  const byKind = { dictation: 0, command: 0, note: 0, polish: 0, agent: 0 };
   let speakingMs = 0;
   for (const h of history) {
     const day = days.find((d) => d.key === new Date(h.at).toDateString());
@@ -293,6 +305,7 @@ function pageInsights() {
       <div class="item"><h4>Comandos</h4><b>${fmt(byKind.command)}</b></div>
       <div class="item"><h4>Transformações</h4><b>${fmt(byKind.polish)}</b></div>
       <div class="item"><h4>Notas por voz</h4><b>${fmt(byKind.note)}</b></div>
+      <div class="item"><h4>Agente</h4><b>${fmt(byKind.agent)}</b></div>
     </div>
     <p class="muted">"Minutos economizados" compara o tempo que você levaria digitando a 40 palavras por minuto com o tempo que passou falando.</p>
   </div></div>`;
@@ -455,6 +468,7 @@ const SHORTCUTS = [
   ["handsFree", "Mãos livres", "Aperte para começar e de novo para terminar."],
   ["command", "Modo comando", "Com texto selecionado: diga o que fazer com ele. Sem seleção: peça algo."],
   ["note", "Nota por voz", "Dita uma nota que vai para Notas, sem colar."],
+  ["agent", "Modo agente", "Fale uma tarefa e o Claude Code a executa no computador. Ações arriscadas e envios pedem confirmação; Esc cancela. Os outros atalhos seguem funcionando enquanto ele trabalha."],
   ["pasteLast", "Colar o último ditado", "Cola de novo a última transcrição."],
   ["copyLast", "Copiar o último ditado", "Copia a última transcrição."],
 ];
@@ -509,7 +523,8 @@ function settingsBody() {
       <div class="item"><div><h4>Formatar ditados com IA</h4><p>Reescreve cada ditado no estilo escolhido em Estilo, com autocorreções e listas. Acrescenta alguns segundos por ditado.</p></div><div class="control">${sw(settings.ai.formatDictation && settings.ai.enabled, 'data-ai="formatDictation"')}</div></div>
       <div class="item"><div><h4>Modelo do Ollama</h4><p>${state.ollama.available ? `${state.ollama.models.length} modelo(s) instalado(s). Modelos menores respondem mais rápido.` : "Ollama não encontrado em localhost:11434."}</p></div>
         <div class="control"><select class="select" data-ai-select="model">${optionList(models.map((m) => [m, m]), settings.ai.model)}</select><button class="icon-btn" data-act="refresh-ollama" title="Atualizar lista">${icon("search", 16)}</button></div></div>
-    </div>`;
+    </div>
+    ${agentSettings()}`;
   }
   return `<h2>Sistema</h2><div class="group">
       <div class="item"><div><h4>Iniciar com o sistema</h4><p>Abre em segundo plano ao entrar na sessão.</p></div><div class="control">${sw(settings.autostart, 'data-set="autostart"')}</div></div>
@@ -526,11 +541,54 @@ function settingsBody() {
     </div>`;
 }
 
+function agentSettings() {
+  const { settings, state } = S;
+  const a = settings.agent;
+  const bin = state.agent.bin;
+  const on = a.enabled ?? Boolean(bin);
+  const missing = a.bin.trim()
+    ? `Nada executável em ${esc(a.bin.trim())}. Corrija o caminho ou deixe em branco para procurar o <code>claude</code> no PATH.`
+    : `Claude Code não encontrado (nem no PATH, nem em ~/.local/bin/claude). Instale em <a href="https://claude.com/claude-code" target="_blank">claude.com/claude-code</a> e faça login com <code>claude</code>.`;
+  return `<div class="group-title">Modo agente</div>
+    <div class="group">
+      <div class="item"><div><h4>Modo agente (Claude Code)</h4><p>${settings.shortcuts.agent?.length ? `Segure ${keysHtml(settings.shortcuts.agent, { soft: true })}` : "Com um atalho definido, segure-o"}, fale uma tarefa e o Claude Code a executa no computador e no navegador. ${a.confirmAll ? "Antes de cada ação que altera algo (comando, arquivo, clique ou digitação), o DronsioFlow mostra a ação exata e só a deixa executar se você confirmar." : "Ele age sozinho dentro dos limites de Autonomia do agente, abaixo; o que é arriscado espera a sua confirmação."}</p>
+        ${bin ? "" : `<p class="warn">${missing}</p>`}
+        ${settings.shortcuts.agent?.length ? "" : `<p class="warn">Sem atalho: Ctrl + Super + Shift já é usado por outra ação. Escolha um em Configurações → Atalhos.</p>`}</div><div class="control">${sw(on, 'data-agent="enabled"')}</div></div>
+      <div class="item"><div><h4>Caminho do Claude Code</h4><p>${bin ? `Usando <code>${esc(bin)}</code>.` : "Não encontrado."} Em branco: <code>claude</code> do PATH ou ~/.local/bin/claude.</p></div>
+        <div class="control"><input class="input" style="width:220px" data-agent-text="bin" placeholder="claude" value="${esc(a.bin)}" spellcheck="false" /></div></div>
+      <div class="item"><div><h4>Tempo máximo</h4><p>Por etapa do agente; passado o limite, ele é interrompido.</p></div>
+        <div class="control"><select class="select" data-agent-select="timeoutMin">${optionList([5, 10, 20, 30, 60].map((m) => [String(m), `${m} min`]), String(a.timeoutMin))}</select></div></div>
+    </div>
+    <div class="group-title">Autonomia do agente</div>
+    <div class="group">
+      <div class="item"><div><h4>Confirmar tudo</h4><p>Desligado, o agente navega, clica, digita, roda comandos comuns e grava arquivos nas pastas de trabalho sozinho, e só pede confirmação para o que é arriscado. Ligado, toda ação que altera algo espera a sua confirmação.</p></div>
+        <div class="control">${sw(a.confirmAll, 'data-agent="confirmAll"')}</div></div>
+      <div class="item stack"><div><h4>Pastas de trabalho</h4><p>Onde o agente cria e edita arquivos sem perguntar. Arquivos ocultos da sua pasta pessoal (como ~/.bashrc) pedem confirmação mesmo aqui. Pastas sensíveis ou amplas demais (a pasta pessoal inteira, /, /etc, /usr) não são aceitas.</p>
+        <div class="agent-list">${a.workDirs.map((d, i) => `<div class="entry"><code>${esc(d)}</code>${S.agentWorkDirProblems?.[i] ? `<span class="warn">ignorada: ${esc(S.agentWorkDirProblems[i])}</span>` : ""}<button class="btn ghost small" data-act="remove-work-dir" data-arg="${i}">Remover</button></div>`).join("") || `<p class="muted">Nenhuma pasta: toda gravação de arquivo pede confirmação.</p>`}</div></div>
+        <div class="control"><button class="btn secondary" data-act="add-work-dir">Adicionar pasta</button></div></div>
+      <div class="item stack"><div><h4>Comandos que pedem confirmação</h4><p>Estas regras são fixas:</p>
+        <dl class="rules">${(S.agentRules || []).map((r) => `<dt>${esc(r.title)}</dt><dd>${esc(r.items.join(", "))}</dd>`).join("")}</dl>
+        <p style="margin-top:12px">E também estes, que você pode mudar (o começo do comando; * no fim vale qualquer continuação, ex.: <code>make deploy*</code>):</p>
+        <div class="agent-list">${a.confirmPatterns.map((p, i) => `<div class="entry"><code>${esc(p)}</code><button class="btn ghost small" data-act="remove-pattern" data-arg="${i}">Remover</button></div>`).join("")}</div>
+        <form class="pattern-form" data-form="addPattern"><input class="input" id="f-pattern" placeholder="Ex.: terraform apply" spellcheck="false" /><button class="btn secondary" type="submit">Adicionar</button></form></div></div>
+    </div>
+    <p class="muted" style="margin-bottom:8px">Enviar mensagens, publicar e comprar no navegador dependem de o agente parar e pedir confirmação, como manda a instrução dele: não é uma garantia. A lista de comandos reduz o risco, mas não cobre tudo.</p>
+    <p class="muted">A instrução falada (já transcrita) e o conteúdo das páginas e arquivos que o agente abre vão para a sua conta Claude. O áudio continua só no computador.</p>`;
+}
+
 function renderModal() {
   const root = $("#modal-root");
   const capture = S.state.capture;
   let html = "";
-  if (capture) {
+  const action = S.state.agent.step === "confirm" && S.state.agent.action;
+  const confirming = Boolean(action);
+  if (confirming) {
+    html = `<div class="modal confirm"><h2>Confirmar ação do agente</h2><p class="lead">${esc(action.title)}:</p>
+      <div class="confirm-action">${esc(action.detail)}</div>
+      ${action.why ? `<p class="confirm-why">Pede confirmação porque ${esc(action.why)}.</p>` : ""}
+      <p class="muted">Confira os detalhes antes de confirmar. Se cancelar, nada é executado.</p>
+      <div class="foot"><button class="btn secondary" data-act="agent-confirm" data-arg="${esc(action.id)}:0">Cancelar</button><button class="btn danger" data-act="agent-confirm" data-arg="${esc(action.id)}:1">Confirmar</button></div></div>`;
+  } else if (capture) {
     const name = capture.startsWith("polish:")
       ? S.settings.polishPresets.find((p) => `polish:${p.id}` === capture)?.name || "Transformação"
       : [...SHORTCUTS, ...STYLE_SHORTCUTS.map(([n, t]) => [n, n === "cycleStyle" ? t : `Estilo ${t}`])].find(([n]) => n === capture)?.[1] || capture;
@@ -566,8 +624,10 @@ function renderModal() {
   const open = Boolean(html);
   if (!open) return (root.innerHTML = "");
   // keep focus/typing intact when only the data behind an open form changed
-  if (root.dataset.kind === (capture ? "capture" : ui.modal) && root.contains(document.activeElement) && document.activeElement.matches("input,textarea,select")) return;
-  root.dataset.kind = capture ? "capture" : ui.modal;
+  const kind = confirming ? "confirm" : capture ? "capture" : ui.modal;
+  if (root.dataset.kind === kind && root.contains(document.activeElement) && document.activeElement.matches("input,textarea,select")) return;
+  root.dataset.kind = kind;
+  if (confirming && ui.confirmId !== action.id) Object.assign(ui, { confirmId: action.id, confirmShownAt: Date.now() });
   root.innerHTML = `<div class="overlay-bg" data-act="backdrop">${html}</div>`;
   root.querySelector("[autofocus]")?.focus();
 }
@@ -615,6 +675,7 @@ document.addEventListener("focusout", () => setTimeout(() => ui.pendingRender &&
 // ---- actions --------------------------------------------------------------------
 
 const setAi = (patch) => api.setSettings({ ai: { ...S.settings.ai, ...patch } });
+const setAgent = (patch) => api.setSettings({ agent: { ...S.settings.agent, ...patch } });
 
 async function loadMics() {
   ui.mics = await api.listMicrophones();
@@ -649,7 +710,7 @@ const ACTIONS = {
     render();
   },
   backdrop: (_a, ev) => {
-    if (ev.target.classList.contains("overlay-bg") && !S.state.capture) ACTIONS["close-modal"]();
+    if (ev.target.classList.contains("overlay-bg") && !S.state.capture && S.state.agent.step !== "confirm") ACTIONS["close-modal"]();
   },
   dismiss: (id) => api.setSettings({ dismissed: [...(S.settings.dismissed || []), id] }),
   "dismiss-error": () => api.dismissError(),
@@ -717,6 +778,23 @@ const ACTIONS = {
     document.activeElement?.blur();
     api.deleteNote(id);
   },
+  // a click meant for the previous dialog must not confirm the next one that just replaced it
+  // the answer carries the id of the dialog it belongs to, so the main process can drop a stale one
+  "agent-confirm": (arg) => {
+    const [id, ok] = arg.split(":");
+    if (ok !== "1" || Date.now() - ui.confirmShownAt > 600) api.agentConfirm(id, ok === "1");
+  },
+  "toggle-actions": (at) => {
+    if (!ui.openActions.delete(at)) ui.openActions.add(at);
+    render();
+  },
+  "add-work-dir": async () => {
+    const r = await api.pickWorkDir();
+    if (r?.error) return toast(r.error);
+    if (r?.dir && !S.settings.agent.workDirs.includes(r.dir)) setAgent({ workDirs: [...S.settings.agent.workDirs, r.dir] });
+  },
+  "remove-work-dir": (i) => setAgent({ workDirs: S.settings.agent.workDirs.filter((_, j) => j !== Number(i)) }),
+  "remove-pattern": (i) => setAgent({ confirmPatterns: S.settings.agent.confirmPatterns.filter((_, j) => j !== Number(i)) }),
   "refresh-ollama": () => api.refreshOllama(),
   "open-folder": () => api.openFolder(),
   quit: () => api.quit(),
@@ -735,6 +813,9 @@ document.addEventListener("change", (ev) => {
   else if (el.dataset.select) api.setSettings({ [el.dataset.select]: el.value });
   else if (el.dataset.ai) setAi({ [el.dataset.ai]: el.checked });
   else if (el.dataset.aiSelect) setAi({ [el.dataset.aiSelect]: el.value });
+  else if (el.dataset.agent) setAgent({ [el.dataset.agent]: el.checked });
+  else if (el.dataset.agentText) setAgent({ [el.dataset.agentText]: el.value.trim() });
+  else if (el.dataset.agentSelect) setAgent({ [el.dataset.agentSelect]: Number(el.value) });
 });
 
 const timers = {};
@@ -773,6 +854,13 @@ document.addEventListener("submit", (ev) => {
   const form = ev.target.closest("[data-form]");
   if (!form) return;
   ev.preventDefault();
+  // inside the settings modal: keep it open
+  if (form.dataset.form === "addPattern") {
+    const pattern = $("#f-pattern").value.trim().replace(/\s+/g, " ");
+    if (pattern && !S.settings.agent.confirmPatterns.includes(pattern)) setAgent({ confirmPatterns: [...S.settings.agent.confirmPatterns, pattern] });
+    $("#f-pattern").value = "";
+    return;
+  }
   if (form.dataset.form === "addWord") {
     const term = $("#f-term").value.trim();
     if (term) api.setSettings({ dictionary: [...S.settings.dictionary, { term, heardAs: $("#f-heard").value.trim() }] });
@@ -786,7 +874,8 @@ document.addEventListener("submit", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && ui.modal && !S.state.capture) ACTIONS["close-modal"]();
+  if (ev.key === "Escape" && S.state.agent.step === "confirm") api.agentConfirm(ui.confirmId, false);
+  else if (ev.key === "Escape" && ui.modal && !S.state.capture) ACTIONS["close-modal"]();
 });
 
 $("#toggle-sidebar").addEventListener("click", () => {

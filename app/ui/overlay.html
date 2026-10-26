@@ -31,6 +31,15 @@
       .pill.flash { width: auto; min-width: 112px; padding: 0 16px; height: 34px; background: #0d0d0d; box-shadow: 0 6px 20px rgb(0 0 0 / .35), 0 0 0 1px rgb(255 255 255 / .12); }
       .pill.flash .msg { display: block; }
       .pill.locked .lock { display: block; }
+      /* Agent mode is red as a whole (the meeting is only a small dot next to the idle pill): a red
+         pill with bars while recording the task, a red pill with light dots while Claude works, and a
+         pulsing ring with a message while it waits for the user to confirm an action. */
+      .pill.agent { background: #d3202a; box-shadow: 0 6px 20px rgb(211 32 42 / .45), 0 0 0 1px rgb(255 255 255 / .2); }
+      .pill.agent .dots i { background: #ffe3e4; opacity: .55; }
+      .pill.agent.working .dots { display: flex; }
+      .pill.agent.confirm { width: auto; padding: 0 16px; animation: ring 1.4s infinite; }
+      .pill.agent.confirm .msg { display: block; }
+      @keyframes ring { 50% { box-shadow: 0 6px 20px rgb(211 32 42 / .45), 0 0 0 5px rgb(255 120 128 / .6); } }
       .meeting { position: absolute; display: none; width: 8px; height: 8px; border-radius: 50%; background: #ff5757; margin-left: 52px; bottom: 10px; }
       body.meeting-on .meeting { display: block; }
       @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
@@ -61,11 +70,17 @@
         const rec = state.phase === "recording";
         const busy = state.phase === "processing";
         const flash = !rec && !busy && state.flash;
-        document.getElementById("msg").textContent = flash || "";
-        pill.className = "pill" + (rec || busy ? " active" : "") + (rec ? " recording" : "") + (busy ? " processing" : "") + (rec && state.locked ? " locked" : "") + (flash ? " flash" : "");
+        // the agent runs beside the recordings: shown when there is no other recording, flash or processing
+        const agentRec = (rec || busy) && state.mode === "agent";
+        const agentIdle = !rec && !busy && !flash && state.agent.running;
+        const confirm = agentIdle && state.agent.step === "confirm";
+        const working = agentIdle && !confirm;
+        document.getElementById("msg").textContent = flash || (confirm ? "Confirme no DronsioFlow" : "");
+        const agent = agentRec || agentIdle;
+        pill.className = "pill" + (rec || busy || agentIdle ? " active" : "") + (rec ? " recording" : "") + (busy ? " processing" : "") + (rec && state.locked ? " locked" : "") + (flash ? " flash" : "") + (agent ? " agent" : "") + (working ? " working" : "") + (confirm ? " confirm" : "");
         const mark = document.getElementById("mark");
-        mark.className = "mark" + (rec && state.mode !== "dictation" ? ` ${state.mode}` : "");
-        document.body.classList.toggle("meeting-on", state.meeting.recording && !rec && !busy);
+        mark.className = "mark" + (rec && state.mode !== "dictation" && !agent ? ` ${state.mode}` : "");
+        document.body.classList.toggle("meeting-on", state.meeting.recording && !rec && !busy && !agentIdle);
         if (!rec) [...bars.children].forEach((b) => (b.style.height = "3px"));
       }
       window.dronsio.onState(apply);

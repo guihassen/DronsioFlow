@@ -1,11 +1,12 @@
 // DronsioFlow — free, local voice dictation for Linux.
-const { app, BrowserWindow, ipcMain, screen, clipboard, Tray, Menu, nativeImage, shell, Notification, nativeTheme } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, clipboard, Tray, Menu, nativeImage, shell, Notification, nativeTheme, dialog } = require("electron");
 const { spawn, execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const text = require("./lib/textproc");
 const llm = require("./lib/llm");
+const agent = require("./lib/agent");
 
 app.setName("DronsioFlow");
 if (!app.requestSingleInstanceLock()) {
@@ -35,7 +36,7 @@ const KEY = { ctrl: 29, shift: 42, alt: 56, super: 125, space: 57, esc: 1, z: 44
 const NORMALIZE = { 97: 29, 54: 42, 100: 56, 126: 125 };
 
 // Shortcuts that record while held (or toggle, for handsFree) and the mode they record in.
-const RECORDING_ACTIONS = { pushToTalk: "dictation", handsFree: "dictation", command: "command", note: "note" };
+const RECORDING_ACTIONS = { pushToTalk: "dictation", handsFree: "dictation", command: "command", note: "note", agent: "agent" };
 
 const DEFAULT_SETTINGS = {
   shortcuts: {
@@ -43,6 +44,7 @@ const DEFAULT_SETTINGS = {
     handsFree: [KEY.ctrl, KEY.super, KEY.space],
     command: [KEY.ctrl, KEY.super, KEY.alt],
     note: [],
+    agent: [KEY.ctrl, KEY.super, KEY.shift], // like command mode: add Shift to Ctrl+Super
     pasteLast: [KEY.shift, KEY.alt, KEY.z],
     copyLast: [KEY.shift, KEY.alt, KEY.x],
     cycleStyle: [], // switches to the next writing style
@@ -69,6 +71,14 @@ const DEFAULT_SETTINGS = {
     selfCorrections: true,
     lists: true,
     translateTo: "",
+  },
+  agent: {
+    enabled: null, // null: on when the claude binary is found
+    bin: "", // empty: `claude` on PATH, else ~/.local/bin/claude
+    timeoutMin: 10, // per claude run
+    confirmAll: false, // true: every action that changes something asks (no autonomy)
+    workDirs: agent.DEFAULT_WORK_DIRS, // where files may be written without asking
+    confirmPatterns: agent.DEFAULT_CONFIRM_PATTERNS, // extra commands that ask, besides the fixed rules
   },
   polishPresets: llm.DEFAULT_POLISH_PRESETS,
   meetingSystemAudio: true,
@@ -110,6 +120,7 @@ function mergeDefaults(saved) {
     ...saved,
     shortcuts: { ...DEFAULT_SETTINGS.shortcuts, ...(saved.shortcuts || {}) },
     ai: { ...DEFAULT_SETTINGS.ai, ...(saved.ai || {}) },
+    agent: { ...DEFAULT_SETTINGS.agent, ...(saved.agent || {}) },
   };
   // v1 kept a free-form vocabulary box; turn it into dictionary terms
   if (saved.vocabulary && !saved.dictionary) {
@@ -119,6 +130,19 @@ function mergeDefaults(saved) {
       .filter((e) => e.term);
   }
   delete merged.vocabulary;
+  // the agent's lists come from the UI: keep only distinct, non-empty strings
+  for (const key of ["workDirs", "confirmPatterns"]) {
+    const list = merged.agent[key];
+    merged.agent[key] = Array.isArray(list) ? [...new Set(list.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()))] : DEFAULT_SETTINGS.agent[key];
+  }
+  // The agent shortcut came after people saved their own: it gets the default only if no other
+  // action (transforms included) already uses those keys; otherwise it starts without a shortcut.
+  if (saved.shortcuts && !("agent" in saved.shortcuts)) {
+    const keys = DEFAULT_SETTINGS.shortcuts.agent;
+    const same = (a) => a?.length === keys.length && a.every((k) => keys.includes(k));
+    const taken = Object.entries(merged.shortcuts).some(([name, k]) => name !== "agent" && same(k)) || (merged.polishPresets || []).some((p) => same(p.shortcut));
+    if (taken) merged.shortcuts = { ...merged.shortcuts, agent: [] };
+  }
   return merged;
 }
 
@@ -136,7 +160,7 @@ const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slic
 
 const state = {
   phase: "idle", // idle | recording | processing
-  mode: null, // dictation | command | note
+  mode: null, // dictation | command | note | agent
   locked: false, // hands-free
   step: null, // transcribing | formatting
   model: { name: settings.model, state: "idle", progress: 0, error: null },
@@ -144,6 +168,9 @@ const state = {
   ollama: { available: false, models: [] },
   meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
   mic: { device: "", label: "Padrão do sistema", bluetooth: false }, // mic recordings use right now
+  // agent task, independent of the phase above: claude binary found, running, step running | confirm,
+  // action { title, detail } waiting for the user's confirmation
+  agent: { bin: null, running: false, step: null, action: null },
   capture: null, // shortcut name being recorded from the keyboard
   lastError: null,
   flash: null, // short message shown on the floating bar (e.g. the new writing style)
@@ -165,7 +192,9 @@ const USER_NAME = process.env.DRONSIO_USER_NAME ?? (() => {
 })();
 
 function snapshot() {
-  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME };
+  return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME, agentRules: agent.BASH_RULES,
+    // why a saved work folder is ignored by the policy (null: in use), shown next to it in Settings
+    agentWorkDirProblems: (settings.agent.workDirs || []).map((d) => agent.workDirProblem(d)) };
 }
 
 function broadcast() {
@@ -350,9 +379,19 @@ function readSelection() {
     .catch(() => "");
 }
 
-async function pasteOrCopy(content) {
-  // Our own window has focus (e.g. opened while a long dictation was processing): Shift+Insert
-  // would land nowhere, so leave the text on the clipboard instead.
+/**
+ * `returnFocus`: the action started in another app. If our window took the focus since then (opened
+ * to check on a long dictation), minimizing it hands the focus back to that app, so the paste lands there.
+ */
+async function pasteOrCopy(content, { returnFocus = false } = {}) {
+  if (returnFocus && mainWindow?.isFocused()) {
+    logStep("window focused during processing: minimizing to return focus");
+    mainWindow.minimize();
+    for (let i = 0; i < 20 && mainWindow.isFocused(); i++) await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100)); // let the other app settle its keyboard focus
+  }
+  // Our own window has focus (the action started here): Shift+Insert would land nowhere,
+  // so leave the text on the clipboard instead.
   if (mainWindow?.isFocused()) {
     clipboard.writeText(content);
     logStep("paste skipped: DronsioFlow window focused");
@@ -485,7 +524,7 @@ function onKeyDown(code) {
         lockChord = chord;
         return broadcast();
       }
-      for (const name of ["command", "note"]) {
+      for (const name of ["command", "note", "agent"]) {
         if (matches(shortcuts[name]) && state.mode !== RECORDING_ACTIONS[name]) return switchMode(RECORDING_ACTIONS[name], shortcuts[name]);
       }
     } else if (chord > lockChord && (matches(shortcuts.handsFree) || matches(shortcuts.pushToTalk))) {
@@ -493,10 +532,14 @@ function onKeyDown(code) {
     }
     return;
   }
+  // Esc during a recording cancels the recording (above); otherwise it cancels the agent
+  if (code === KEY.esc && agentJob) return cancelAgent();
   if (state.phase !== "idle") return;
   const hit = allShortcuts().find((s) => matches(s.keys));
   if (!hit) return;
-  if (hit.name in RECORDING_ACTIONS) {
+  if (hit.name === "agent" && agentJob) {
+    agentBusy();
+  } else if (hit.name in RECORDING_ACTIONS) {
     startRecording(RECORDING_ACTIONS[hit.name], hit.keys, hit.name === "handsFree");
   } else if (hit.name === "pasteLast") {
     if (history[0]) pasteOrCopy(history[0].text);
@@ -521,6 +564,7 @@ const SHORTCUT_NAMES = {
   handsFree: "Mãos livres",
   command: "Modo comando",
   note: "Nota por voz",
+  agent: "Modo agente",
   pasteLast: "Colar o último ditado",
   copyLast: "Copiar o último ditado",
   cycleStyle: "Alternar estilo",
@@ -570,6 +614,11 @@ function onKeyUp(code) {
 }
 
 function switchMode(mode, keys) {
+  if (mode === "agent" && agentJob) return agentBusy(); // keep recording in the current mode
+  if (mode === "agent" && agentProblem()) {
+    cancelRecording();
+    return reportAgentProblem();
+  }
   state.mode = mode;
   activeKeys = keys;
   if (mode === "command") selectionPromise = readSelection();
@@ -584,6 +633,7 @@ let primary = null; // capture from the chosen microphone
 let backup = null; // parallel capture from a wired mic when the chosen one is Bluetooth
 let usedBackupNotice = false;
 let recordingStartedAt = 0;
+let startedInOwnWindow = false; // our window had the focus when the recording started
 let maxTimer = null;
 let levelTimer = null;
 let currentLevel = 0;
@@ -608,8 +658,11 @@ function startRecording(mode, keys, locked) {
     showMainWindow();
     return;
   }
+  if (mode === "agent" && agentJob) return agentBusy();
+  if (mode === "agent" && agentProblem()) return reportAgentProblem();
   currentLevel = 0;
   recordingStartedAt = Date.now();
+  startedInOwnWindow = Boolean(mainWindow?.isFocused());
   const mic = chooseMicrophone();
   primary = spawnCapture(mic.device);
   const fallback = mic.bluetooth ? bestWired() : null;
@@ -622,8 +675,9 @@ function startRecording(mode, keys, locked) {
   activeKeys = keys;
   lockChord = chord;
   selectionPromise = mode === "command" ? readSelection() : null;
-  if (mode !== "command") warmFormatting(); // evaluate the prompt while the user speaks
-  else if (aiReady()) llm.warm(settings.ai.model); // load the model for the command
+  if (mode === "command") {
+    if (aiReady()) llm.warm(settings.ai.model); // load the model for the command
+  } else if (mode !== "agent") warmFormatting(); // evaluate the prompt while the user speaks
   playSound("start");
   maxTimer = setTimeout(stopRecording, MAX_RECORDING_MS);
   silenceTimer = setTimeout(checkMicrophoneDelivers, NO_AUDIO_TIMEOUT_MS);
@@ -703,10 +757,15 @@ async function endRecorder() {
   return Buffer.concat(p.chunks);
 }
 
+let idleWaiters = []; // resolved when the recording or processing in progress is over
+
+const whenIdle = () => (state.phase === "idle" ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve)));
+
 function resetToIdle() {
   Object.assign(state, { phase: "idle", mode: null, locked: false, step: null });
   activeKeys = [];
   broadcast();
+  for (const resolve of idleWaiters.splice(0)) resolve();
 }
 
 async function cancelRecording() {
@@ -734,14 +793,26 @@ function wavFromPcm(pcm) {
 
 async function stopRecording() {
   if (state.phase !== "recording") return;
+  // Releasing Ctrl and Super fires two key-ups; leave "recording" before awaiting, or both stop it
+  // and the second, empty run resets the bar to idle while the real dictation is still processing.
+  state.phase = "processing";
   const duration = Date.now() - recordingStartedAt;
   const mode = state.mode;
+  // claimed before the first await, so Esc can cancel the task while it is still being transcribed
+  const job =
+    mode === "agent"
+      ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve(), since: Date.now(), written: new Set(), actions: [] })
+      : null;
+  let agentStarted = false; // from then on the job outlives this recording
   const recorded = await endRecorder();
   playSound("stop");
-  if (duration < MIN_RECORDING_MS) return resetToIdle();
+  if (duration < MIN_RECORDING_MS) {
+    if (job && agentJob === job) agentJob = null;
+    return resetToIdle();
+  }
   Object.assign(state, { phase: "processing", step: "transcribing" });
   broadcast();
-  logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`);
+  logStep(`stop mode=${mode} locked=${state.locked} audio=${Math.round(duration / 1000)}s`, startedInOwnWindow ? "from=own-window" : "");
   // DRONSIO_TEST_WAV replaces the microphone audio (16 kHz mono WAV) for testing.
   const pcm = process.env.DRONSIO_TEST_WAV
     ? fs.readFileSync(process.env.DRONSIO_TEST_WAV).subarray(44)
@@ -752,17 +823,21 @@ async function stopRecording() {
   try {
     // Without the LLM, Whisper itself can translate to English.
     const task = mode === "dictation" && settings.ai.translateTo === "en" && !useLlmFormatting() ? "translate" : "transcribe";
-    const result = await transcribe([file], { task });
+    // DRONSIO_TEST_AGENT_TEXT replaces the transcription of an agent-mode recording, for testing.
+    const testText = mode === "agent" && process.env.DRONSIO_TEST_AGENT_TEXT;
+    const result = testText ? { text: testText, ms: 0 } : await transcribe([file], { task });
     const raw = result.text.trim();
     logStep(`transcribed ${raw.length} chars in ${((result.ms || 0) / 1000).toFixed(1)}s`);
     if (!raw) return;
     if (mode === "command") await handleCommand(raw, duration);
+    else if (mode === "agent") agentStarted = startAgent(raw, duration, job);
     else await handleDictation(raw, duration, result.ms, mode === "note", result.language);
   } catch (e) {
     logStep(`failed: ${e.message}`);
     setError(`Falha na transcrição: ${e.message}`);
   } finally {
     fs.rm(file, { force: true }, () => {});
+    if (job && !agentStarted && agentJob === job) agentJob = null;
     resetToIdle();
   }
 }
@@ -814,7 +889,7 @@ async function handleDictation(raw, durationMs, processingMs, asNote, language) 
     writeJson(FILES.notes, notes);
     notify("Nota salva", final.slice(0, 120));
   } else {
-    await pasteOrCopy(final);
+    await pasteOrCopy(final, { returnFocus: !startedInOwnWindow });
   }
   addHistory({ text: final, raw, durationMs, processingMs, kind: asNote ? "note" : "dictation" });
 }
@@ -833,7 +908,7 @@ async function handleCommand(instruction, durationMs) {
       ? await llm.generate(settings.ai.model, llm.COMMAND_WITH_SELECTION, `INSTRUÇÃO: ${instruction}\n\nTEXTO SELECIONADO:\n${selection}`, { timeoutMs: 90000 })
       : await llm.generate(settings.ai.model, llm.COMMAND_WITHOUT_SELECTION, instruction, { timeoutMs: 90000 });
     if (!out) return;
-    await pasteOrCopy(out);
+    await pasteOrCopy(out, { returnFocus: !startedInOwnWindow });
     addHistory({ text: out, raw: instruction, durationMs, kind: "command", selection: selection.slice(0, 2000) });
   } catch (e) {
     setError(`Falha no modo comando: ${e.message}`);
@@ -842,10 +917,214 @@ async function handleCommand(instruction, durationMs) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Agent mode: the spoken task goes to Claude Code (lib/agent.js), sensitive actions need a confirmation
+// ---------------------------------------------------------------------------
+
+// Task in progress, at most one: { cancelled, cancel() and hold() of the running claude, decide(ok)
+// while a confirmation is open, confirmations (queue: one dialog at a time) }. It runs beside the
+// recording phases (state.agent), so dictation and the other shortcuts keep working meanwhile.
+let agentJob = null;
+
+function refreshAgentBin() {
+  state.agent.bin = agent.findClaude(settings.agent.bin.trim());
+}
+
+function agentProblem() {
+  refreshAgentBin();
+  // enabled null (default): on whenever the binary is there, so a missing one is reported as such
+  if (settings.agent.enabled === false) return "O modo agente está desligado. Ative em Configurações → IA.";
+  if (state.agent.bin) return null;
+  return settings.agent.bin.trim()
+    ? `Não encontrei o Claude Code em ${settings.agent.bin.trim()}. Corrija o caminho em Configurações → IA.`
+    : "O modo agente precisa do Claude Code instalado (claude.com/claude-code). Instale ou informe o caminho em Configurações → IA.";
+}
+
+function reportAgentProblem() {
+  const problem = agentProblem();
+  logStep(`agent unavailable: ${problem}`);
+  setError(problem);
+  notify("Modo agente indisponível", problem);
+}
+
+const agentBusy = () => flash("Agente já em execução");
+
+function cancelAgent({ force = false } = {}) {
+  if (!agentJob || agentJob.cancelled) return;
+  logStep("agent cancel requested");
+  agentJob.cancelled = true;
+  agentJob.cancel?.(force);
+  agentJob.decide?.(false);
+}
+
+/**
+ * Shows Confirmar/Cancelar for `action` ({ title, detail }); resolves true only if the user confirmed.
+ * Cancel, the timeout, the agent being cancelled or `closed` settling (the hook gave up) all mean no.
+ * Waits for a dictation in progress to finish (and paste) before bringing the window up, so its
+ * paste never lands in the dialog. One dialog at a time: parallel tool calls queue up.
+ */
+function askConfirmation(job, action, closed) {
+  const ask = () =>
+    new Promise((resolve) => {
+      let done = false;
+      const decide = (ok) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        job.decide = null;
+        Object.assign(state.agent, { action: null, step: "running" });
+        broadcast();
+        resolve(ok);
+      };
+      const timer = setTimeout(() => decide(false), agent.CONFIRM_TIMEOUT_MS);
+      job.decide = decide;
+      closed?.then(() => decide(false));
+      if (job.cancelled) return decide(false);
+      (async () => {
+        while (!done && state.phase !== "idle") await whenIdle();
+        if (done) return;
+        Object.assign(state.agent, { action: { ...action, id: newId() }, step: "confirm" });
+        broadcast();
+        showMainWindow();
+        notify("Agente: confirme a ação", `${action.title}\n${action.detail}`.slice(0, 300));
+      })();
+    });
+  const answer = job.confirmations.then(ask);
+  job.confirmations = answer;
+  return answer;
+}
+
+const agentPolicyOptions = (job) => ({
+  confirmAll: settings.agent.confirmAll,
+  workDirs: settings.agent.workDirs,
+  extraPatterns: settings.agent.confirmPatterns,
+  written: job.written,
+  since: job.since,
+});
+
+/** Keeps what an allowed call did: its line in the history entry, and the files it wrote. */
+function recordAction(job, call, how) {
+  for (const p of agent.writtenPaths(call.tool_name, call.tool_input, agentPolicyOptions(job))) job.written.add(p);
+  const line = agent.describeAction(call.tool_name, call.tool_input);
+  if (line && job.actions.length < 300) job.actions.push({ ...line, how });
+}
+
+/** The PreToolUse hook's question: the policy lets reading and low-risk changes through, the rest waits for the user. */
+async function agentPermission(job, call, closed) {
+  if (job.cancelled) return false;
+  const options = agentPolicyOptions(job);
+  const policy = agent.toolPolicy(call.tool_name, call.tool_input, options);
+  if (policy === "allow") {
+    recordAction(job, call, "auto");
+    if (agent.describeAction(call.tool_name, call.tool_input)) logStep(`agent auto ${call.tool_name}`);
+    return true;
+  }
+  if (policy === "deny") {
+    logStep(`agent ${call.tool_name} refused: sensitive path`);
+    return false;
+  }
+  // why a command asks, shown in the dialog (the fixed rules or the user's list)
+  const why = call.tool_name === "Bash" && !options.confirmAll ? agent.bashDecision(call.tool_input?.command, options).reason : null;
+  logStep(`agent asks to use ${call.tool_name}`, why ? `(${why})` : "");
+  const release = job.hold?.(); // the user's time to decide doesn't count against the run's timeout
+  try {
+    const ok = (await askConfirmation(job, { ...agent.describeToolCall(call.tool_name, call.tool_input), why }, closed)) && !job.cancelled;
+    logStep(`agent ${call.tool_name} ${ok ? "confirmed" : "declined"}`);
+    if (ok) recordAction(job, call, "confirmed");
+    return ok;
+  } finally {
+    release?.();
+  }
+}
+
+/** A cancelled or failed task still leaves its entry when it already did something. */
+function addAgentHistory(job, text, instruction, durationMs, startedAt) {
+  addHistory({ text, raw: instruction, durationMs, processingMs: Date.now() - startedAt, kind: "agent", actions: job.actions });
+}
+
+/** Starts the task in the background; the floating bar and the window follow state.agent. */
+function startAgent(instruction, durationMs, job) {
+  Object.assign(state.agent, { running: true, step: "running", action: null });
+  broadcast();
+  handleAgent(instruction, durationMs, job).finally(() => {
+    if (agentJob === job) agentJob = null;
+    Object.assign(state.agent, { running: false, step: null, action: null });
+    broadcast();
+  });
+  return true;
+}
+
+async function handleAgent(instruction, durationMs, job) {
+  if (job.cancelled) return;
+  if (agentProblem()) return reportAgentProblem();
+  const timeoutMs = Math.min(120, Math.max(1, Number(settings.agent.timeoutMin) || 10)) * 60000;
+  const startedAt = Date.now();
+  let sessionId = null;
+  let server = null;
+  logStep(`agent start chars=${instruction.length} bin=${state.agent.bin}`);
+  try {
+    server = await agent.permissionServer((call, closed) => agentPermission(job, call, closed));
+    for (;;) {
+      if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
+      const turn = agent.run({
+        bin: state.agent.bin,
+        prompt: instruction,
+        sessionId,
+        hookSocket: server.socketPath,
+        workDirs: settings.agent.workDirs,
+        confirmAll: settings.agent.confirmAll,
+        timeoutMs,
+        onEvent: (e) => {
+          if (e.type === "system" && e.subtype === "init") logStep(`agent session ${e.session_id}`);
+          for (const c of e.type === "assistant" ? e.message?.content || [] : []) if (c.type === "tool_use") logStep(`agent tool ${c.name}`);
+        },
+      });
+      Object.assign(job, { cancel: turn.cancel, hold: turn.hold });
+      const out = await turn.promise;
+      Object.assign(job, { cancel: null, hold: null });
+      // Esc right as claude exited: drop the answer, nothing more is confirmed or saved
+      if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
+      sessionId = out.sessionId;
+      if (out.isError) throw new Error(out.result || "o Claude Code devolveu um erro");
+      const action = agent.confirmationRequest(out.result);
+      if (!action) {
+        const answer = out.result.trim() || "Tarefa concluída.";
+        logStep(`agent done in ${((Date.now() - startedAt) / 1000).toFixed(1)}s chars=${answer.length}`);
+        notify("Agente", answer.slice(0, 300));
+        addAgentHistory(job, answer, instruction, durationMs, startedAt);
+        return;
+      }
+      if (!sessionId) throw new Error("o Claude Code não informou a sessão para continuar");
+      logStep("agent waiting for confirmation");
+      if (!(await askConfirmation(job, { title: "O agente pede para continuar", detail: action }))) {
+        if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
+        logStep("agent action declined");
+        notify("Agente", `Cancelado, nada foi feito: ${action}`.slice(0, 300));
+        if (job.actions.length) addAgentHistory(job, `Envio cancelado: ${action}`, instruction, durationMs, startedAt);
+        return;
+      }
+      logStep("agent action confirmed");
+    }
+  } catch (e) {
+    if (e.cancelled || job.cancelled) {
+      logStep("agent cancelled");
+      if (job.actions.length) addAgentHistory(job, "Cancelado no meio da tarefa.", instruction, durationMs, startedAt);
+      return flash("Agente cancelado");
+    }
+    logStep(`agent failed: ${e.message}`);
+    if (job.actions.length) addAgentHistory(job, `Falhou: ${e.message}`, instruction, durationMs, startedAt);
+    setError(`Falha no modo agente: ${e.message}`);
+    notify("Falha no modo agente", e.message);
+  } finally {
+    server?.close();
+  }
+}
+
 async function runPolish(presetId) {
   const preset = settings.polishPresets.find((p) => p.id === presetId);
   if (!preset) return;
   if (!aiReady()) return setError("O Polish precisa da IA (Ollama). Ative em Estilo e IA.");
+  const fromOwnWindow = Boolean(mainWindow?.isFocused());
   const selection = await readSelection();
   if (!selection.trim()) {
     notify("Polish", "Selecione um texto antes de usar o atalho.");
@@ -857,7 +1136,7 @@ async function runPolish(presetId) {
     const system = `${preset.prompt}\nDevolva somente o texto reescrito, sem aspas e sem explicações.`;
     const out = await llm.generate(settings.ai.model, system, selection, { timeoutMs: 90000 });
     if (out) {
-      await pasteOrCopy(out);
+      await pasteOrCopy(out, { returnFocus: !fromOwnWindow });
       addHistory({ text: out, raw: selection.slice(0, 2000), kind: "polish", preset: preset.name });
     }
   } catch (e) {
@@ -1079,7 +1358,10 @@ function createMainWindow() {
       mainWindow.hide(); // dictation keeps running in the background
     }
   });
-  mainWindow.on("focus", () => refreshOllama());
+  mainWindow.on("focus", () => {
+    refreshOllama();
+    refreshAgentBin();
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
@@ -1125,7 +1407,7 @@ function placeOverlay() {
 /** The bar stays as a small idle pill (always visible, unobtrusive) and grows while recording. */
 function updateOverlay() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const visible = state.phase !== "idle" || state.meeting.recording || settings.showIdleBar || Boolean(state.flash);
+  const visible = state.phase !== "idle" || state.agent.running || state.meeting.recording || settings.showIdleBar || Boolean(state.flash);
   if (!visible) {
     if (overlayWindow.isVisible()) overlayWindow.hide();
     overlayPhase = null;
@@ -1169,6 +1451,7 @@ ipcMain.handle("set-settings", (_e, patch) => {
   if ("theme" in patch) nativeTheme.themeSource = settings.theme;
   if ("microphone" in patch) state.mic = chooseMicrophone();
   if (patch.ai || patch.dictionary) warmFormatting();
+  if (patch.agent) refreshAgentBin();
   broadcast();
   return settings;
 });
@@ -1230,6 +1513,23 @@ ipcMain.handle("delete-note", (_e, id) => {
   broadcast();
 });
 
+// Only the dialog on screen can be answered: a late click or Esc meant for an earlier one is ignored.
+ipcMain.handle("agent-confirm", (_e, id, ok) => {
+  if (state.agent.step === "confirm" && id && state.agent.action?.id === id) agentJob?.decide?.(ok === true);
+});
+ipcMain.handle("cancel-agent", () => cancelAgent());
+
+/** Folder picker for the agent's work folders; a sensitive folder (~/.ssh…) is refused. */
+ipcMain.handle("pick-work-dir", async () => {
+  const r = await dialog.showOpenDialog(mainWindow, { title: "Pasta de trabalho do agente", properties: ["openDirectory", "createDirectory"] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  const dir = r.filePaths[0];
+  const problem = agent.workDirProblem(dir, os.homedir());
+  if (problem) return { error: problem };
+  const home = os.homedir();
+  return { dir: dir === home || dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir };
+});
+
 ipcMain.handle("start-meeting", () => startMeeting());
 ipcMain.handle("stop-meeting", () => stopMeeting());
 ipcMain.handle("delete-meeting", (_e, id) => {
@@ -1261,6 +1561,7 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 app.on("second-instance", showMainWindow);
 app.on("before-quit", () => {
   quitting = true;
+  cancelAgent({ force: true });
   for (const cap of [primary, backup]) cap?.proc.kill("SIGTERM");
   micWatcher?.kill("SIGTERM");
   for (const p of meetingProcs) p.kill("SIGTERM");
@@ -1271,6 +1572,8 @@ app.on("window-all-closed", (e) => e.preventDefault());
 
 app.whenReady().then(async () => {
   nativeTheme.themeSource = settings.theme;
+  refreshAgentBin();
+  agent.cleanStaleDirs();
   createMainWindow();
   createOverlayWindow();
   createTray();
