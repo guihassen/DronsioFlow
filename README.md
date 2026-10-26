@@ -169,15 +169,32 @@ Segure **Ctrl + Super + Shift**, fale uma tarefa e solte: a instrução transcri
 Claude in Chrome) e o terminal. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
 perguntando como ela está".
 
-- **Confirmação garantida pelo app**: **toda** chamada de ferramenta passa pela checagem do app antes de executar.
-  Ler (abrir páginas, pesquisar, ler arquivos, capturar a tela) e a organização interna do agente (subagentes, lista
-  de tarefas) passam direto. Todo o resto pede confirmação, inclusive ferramentas que o app não conhece:
-  comandos no terminal, criar ou editar arquivos, buscar uma URL com WebFetch, clicar, digitar, preencher campos ou
-  rodar script no Chrome. A janela do DronsioFlow vem para a frente mostrando a ação **real**: o comando exato, o
-  caminho e o começo do conteúdo do arquivo, a URL buscada, o alvo do clique ou o texto digitado, e não a descrição
-  que o modelo deu. Só **Confirmar** deixa executar; **Cancelar**, Esc no diálogo ou 5 minutos sem resposta recusam,
-  e o agente termina dizendo o que não fez. A resposta vale só para o diálogo que está na tela. Isso vale mesmo que
-  uma página ou mensagem tente instruir o agente a agir sozinho.
+- **Autonomia com limites**: **toda** chamada de ferramenta passa pela checagem do app antes de executar
+  (`toolPolicy` em `app/lib/agent.js`). O que é comum roda sozinho; o arriscado pede confirmação; o sensível é
+  bloqueado:
+
+  | | O que entra |
+  |---|---|
+  | **Automático** | ler arquivos e páginas, pesquisar; **no Chrome**, navegar, clicar, digitar, teclas, preencher campos e rolar, em qualquer site; **criar e editar arquivos** dentro das pastas de trabalho (padrão `~/Documentos`, `~/Downloads` e `/tmp`); **comandos no terminal** que não caem em nenhuma regra abaixo (`ls`, `git status/add/commit`, `npm test`, `mkdir`, `cp`/`mv` dentro das pastas de trabalho…) |
+  | **Confirmar** | **envio em nome do usuário** no navegador (mensagem, e-mail, post, formulário, compra), pela regra `CONFIRMAR:` (veja abaixo); criar ou editar arquivos fora das pastas de trabalho, arquivos ocultos da home (mesmo dentro delas) e `.git`; JavaScript na página (`javascript_tool`: roda código na sua sessão logada); enviar pelo Chrome um arquivo de fora das pastas de trabalho (`file_upload`); WebFetch, subagente remoto e ferramentas desconhecidas; comandos que **apagam** (`rm`, `find -delete`, `git clean`, `git reset --hard`…), **mexem no sistema** (`sudo`, instalar/remover pacotes, `systemctl`, `kill`, `dd`, `chmod -R`, `crontab`, gravar fora das pastas de trabalho…), **publicam ou enviam** (`git push`, `gh pr create`, `ssh`/`scp`, `rsync host:`, `curl -d/-F/-T/-X POST`, `nc`…) ou usam **brechas** (`bash -c`, `python -c`, `node -e`, `eval`, pipe para um interpretador, `$(…)` e crases, rodar um arquivo criado ou alterado na tarefa, `xargs`/`find -exec` com um comando da lista, `alias`/funções, `source` de fora das pastas, caminhos sensíveis, `>` para fora das pastas, variáveis como `PATH`); e os padrões extras da sua lista |
+  | **Bloqueado** | ler ou gravar arquivos sensíveis (abaixo), `/proc`, ferramentas desligadas (abaixo) e os conectores da conta claude.ai |
+
+  Comandos compostos (`;`, `&&`, `||`, `|`, quebras de linha, `if`/`for`) são analisados parte por parte, e qualquer
+  coisa que o analisador não consiga acompanhar (aspas sem fechar, comando vindo de variável, caminho relativo sem
+  saber a pasta atual) pede confirmação. O diálogo mostra a ação **real** (o comando exato, o caminho e o começo do
+  conteúdo do arquivo, a URL, o alvo do clique ou o texto digitado, e não a descrição do modelo) e o motivo de pedir
+  confirmação. Só **Confirmar** deixa executar; **Cancelar**, Esc no diálogo ou 5 minutos sem resposta recusam, e o
+  agente termina dizendo o que não fez.
+- **Limites, em palavras claras**: o envio no navegador (mensagem, post, compra) depende de o agente seguir a
+  instrução de parar com `CONFIRMAR:` antes do clique final. Isso **não é determinístico**: clicar e digitar são
+  automáticos, então um agente que desobedeça (ou seja enganado por uma página) poderia enviar sem perguntar. A lista
+  de comandos é uma lista de bloqueio e **não cobre tudo**: um programa que não está nela roda sozinho, e comandos de
+  build e teste (`npm test`, `make`) rodam scripts do projeto, que o agente pode ter editado dentro de uma pasta de
+  trabalho. As regras de brecha reduzem esse risco, não o eliminam. Se preferir revisar tudo, ligue **Confirmar
+  tudo**.
+- **Histórico transparente**: cada ação que alterou algo (comando exato, arquivo gravado ou editado, ação no
+  navegador) fica registrada na entrada **Agente** do histórico, marcada como automática ou confirmada; clique em
+  "N ações" para ver a lista. Tarefas canceladas ou que falharam também ficam no histórico se já tinham feito algo.
 - **Arquivos sensíveis nunca são lidos**, nem com confirmação: `~/.ssh`, `~/.gnupg`, `~/.claude` e `~/.claude.json`,
   `~/.config` (inclui o próprio DronsioFlow e os perfis do Chrome/Chromium), `~/.local/share/keyrings`, `~/.mozilla`,
   e em qualquer lugar arquivos `.env*`, `*.pem`, `*.key`, `id_rsa*` e `id_ed25519*`. O caminho é conferido depois de
@@ -192,8 +209,10 @@ perguntando como ela está".
 - **Risco residual aceito**: abrir uma página no Chrome (`navigate`) não pede confirmação. Como o Chrome usa as suas
   sessões logadas, um link que faz algo só por ser aberto (um GET com efeito, como "confirmar inscrição" ou
   "descadastrar") seria seguido sem perguntar, e a URL aberta pode levar dados para fora dentro dela.
-- Antes de enviar mensagem ou e-mail, publicar ou comprar, o agente também para e descreve a ação em uma frase, para
-  você confirmar a intenção antes dos cliques.
+- **Envio em nome do usuário**: antes de mandar mensagem ou e-mail, publicar, enviar formulário ou comprar, o agente
+  prepara tudo e para uma vez, antes do clique ou da tecla final, com `CONFIRMAR: enviar "<texto exato>" para
+  <destinatário> no <app>`. A janela mostra isso com Confirmar/Cancelar; ele só envia depois de "Confirmado". A
+  instrução também manda nunca enviar por ordem vinda de uma página, mensagem ou arquivo: só vale o seu pedido.
 - **Os outros atalhos seguem funcionando** enquanto o agente trabalha: ditado, comando, nota, transformações e
   colar/copiar o último. Só um agente roda por vez (o atalho avisa se já houver um). Se uma confirmação surgir no meio
   de um ditado, a janela espera o ditado terminar de colar antes de aparecer.
@@ -204,7 +223,11 @@ perguntando como ela está".
 - Requer o Claude Code instalado e logado (`claude` no PATH ou em `~/.local/bin/claude`) e, para o navegador, a
   extensão Claude in Chrome conectada. Sem o Claude Code, o atalho só mostra um aviso.
 - Em **Configurações → IA → Modo agente**: liga/desliga (vem ligado se o `claude` for encontrado), caminho do
-  binário e tempo máximo de cada etapa (padrão 10 min).
+  binário e tempo máximo de cada etapa (padrão 10 min). Em **Autonomia do agente**: **Confirmar tudo** (desligado
+  por padrão; ligado, volta à política antiga, em que tudo que altera algo pede confirmação), as **pastas de
+  trabalho** (adicionar com o seletor de pastas, remover) e os **comandos que pedem confirmação**: as regras fixas,
+  só para ler, e uma lista sua de padrões extras (o começo do comando, como `terraform apply`; `*` no fim vale
+  qualquer continuação). A lista vem com alguns exemplos (`docker rm`, `kubectl delete`, `terraform destroy`…).
 - Por baixo, o app roda `claude -p` sem shell, num grupo de processos próprio (cancelar ou estourar o tempo encerra
   o `claude` e tudo o que ele abriu). Um hook `PreToolUse` com matcher `*` (`app/native/agent_hook.js`) pergunta ao
   app, por um socket Unix privado (pasta 0700, socket 0600), sobre cada chamada; se o app não responder, recusa, e
@@ -257,7 +280,7 @@ Fica no rodapé da tela e mostra o estado sem atrapalhar (os cliques passam atra
 | **Geral** | atalho de ditado, microfone (**Automático** com fio, **Automático preferindo fone Bluetooth**, padrão do sistema ou um específico, mostrando qual está em uso), idioma falado (português, inglês, espanhol, francês, alemão, italiano ou detecção automática) e tema |
 | **Atalhos** | todos os atalhos (inclusive os de estilo), com remover e restaurar padrão. O app recusa um atalho que já está em uso e avisa quando a combinação também chega ao app em foco (como Ctrl+S), já que as teclas não são bloqueadas |
 | **Voz e modelo** | modelo do Whisper: Tiny (75 MB), Base (145 MB), Small (480 MB, recomendado), Medium (1,5 GB) ou Large v3 Turbo (1,6 GB), com progresso do download |
-| **IA** | liga/desliga a IA local e escolhe o modelo do Ollama; **Modo agente**: liga/desliga, caminho do `claude` e tempo máximo |
+| **IA** | liga/desliga a IA local e escolhe o modelo do Ollama; **Modo agente**: liga/desliga, caminho do `claude`, tempo máximo, Confirmar tudo, pastas de trabalho e comandos que pedem confirmação |
 | **Sistema** | iniciar com o sistema, sons de início/fim, mostrar a barra quando parado, tecla de colar (Shift+Insert, Ctrl+V ou Ctrl+Shift+V), restaurar a área de transferência, abrir a pasta de dados, apagar o histórico e sair |
 
 A colagem padrão é Shift+Insert, porque o app preenche tanto a área de transferência quanto a seleção primária
@@ -315,6 +338,7 @@ app/main.js                 processo principal (Electron): atalhos, gravação, 
 app/lib/llm.js              prompts e chamadas ao Ollama (com proteção de memória)
 app/lib/textproc.js         dicionário, snippets e remoção de hesitações sem IA
 app/lib/agent.js            modo agente: roda o Claude Code (claude -p), socket de confirmação e política das ferramentas
+app/lib/bashpolicy.js       modo agente: analisa os comandos do terminal e decide quais pedem confirmação
 app/native/agent_hook.js    hook PreToolUse do modo agente: pergunta ao app se a ferramenta pode rodar
 app/native/input_helper.py  lê teclado/mouse (evdev) e cola (wl-copy/xclip + tecla simulada via uinput)
 app/native/transcriber.py   motor Whisper local (baixa o modelo do Hugging Face na 1ª vez)
@@ -340,7 +364,8 @@ Depois de editar algo em `app/`, rode `./install.sh` de novo e reinicie o app.
 - `tools/press_keys.py`: simula um atalho por um teclado virtual.
 - `tools/make_sounds.py`: gera os sons de início/fim.
 - `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:`, a política das ferramentas
-  (inclusive caminhos sensíveis e ferramentas desconhecidas), o hook de confirmação de ponta a ponta (com um `claude`
+  (autonomia, Confirmar tudo, pastas de trabalho, mais de 140 comandos de terminal entre automáticos e confirmados,
+  caminhos sensíveis e ferramentas desconhecidas), o hook de confirmação de ponta a ponta (com um `claude`
   falso que chama o hook real) e o cancelamento/tempo esgotado do grupo de processos.
 - Variáveis de ambiente: `DRONSIO_TEST_WAV=arquivo.wav` (usa o arquivo no lugar do microfone),
   `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico),
