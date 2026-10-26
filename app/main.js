@@ -1522,7 +1522,8 @@ ipcMain.handle("pick-work-dir", async () => {
   const r = await dialog.showOpenDialog(mainWindow, { title: "Pasta de trabalho do agente", properties: ["openDirectory", "createDirectory"] });
   if (r.canceled || !r.filePaths[0]) return null;
   const dir = r.filePaths[0];
-  if (agent.sensitivity(dir, os.homedir()) === "deny") return { error: "Essa pasta guarda dados sensíveis e não pode ser uma pasta de trabalho." };
+  const problem = agent.workDirProblem(dir, os.homedir());
+  if (problem) return { error: problem };
   const home = os.homedir();
   return { dir: dir === home || dir.startsWith(home + path.sep) ? `~${dir.slice(home.length)}` : dir };
 });

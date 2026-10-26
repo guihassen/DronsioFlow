@@ -139,9 +139,24 @@ function inputPaths(input, out = []) {
   return out;
 }
 
+const SYSTEM_ROOTS = ["/", "/home", "/etc", "/usr", "/var", "/opt", "/boot", "/root", "/srv", "/mnt", "/media", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run"];
+const SYSTEM_TREES = ["/etc", "/usr", "/boot", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys", "/dev", "/run", "/root"];
+
+/** Why `dir` can't be a work folder (the agent writes there without asking), or null. */
+function workDirProblem(dir, cwd = os.homedir()) {
+  if (typeof dir !== "string" || !dir.trim()) return "Pasta vazia.";
+  const s = sensitivity(dir, cwd);
+  if (s === "deny" || s === "hidden") return "Essa pasta guarda dados sensíveis e não pode ser uma pasta de trabalho.";
+  const real = realPath(dir, cwd);
+  // the whole home, /, /home, or a system folder: far too wide to write in without asking
+  if (s === "contains" || SYSTEM_ROOTS.includes(real) || SYSTEM_TREES.some((t) => inside(real, t)))
+    return "Essa pasta é ampla demais (contém a sua pasta pessoal ou arquivos do sistema). Escolha uma pasta de projeto, como ~/Documentos/projeto.";
+  return null;
+}
+
 /** The checks a policy needs, bound to the task's settings. */
 function policyContext({ cwd = os.homedir(), workDirs = DEFAULT_WORK_DIRS, written = new Set(), since = 0, extraPatterns = [] } = {}) {
-  const roots = workDirs.filter((d) => typeof d === "string" && d.trim() && sensitivity(d, cwd) !== "deny").map((d) => realPath(d, cwd));
+  const roots = workDirs.filter((d) => !workDirProblem(d, cwd)).map((d) => realPath(d, cwd));
   const isWorkPath = (p) => {
     const real = realPath(p, cwd);
     return roots.some((r) => inside(real, r));
@@ -507,6 +522,7 @@ module.exports = {
   BASH_RULES,
   systemPrompt,
   sensitivity,
+  workDirProblem,
   bashDecision,
   writtenPaths,
   describeAction,
