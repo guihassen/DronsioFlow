@@ -7,6 +7,7 @@ const path = require("path");
 const text = require("./lib/textproc");
 const llm = require("./lib/llm");
 const agent = require("./lib/agent");
+const browser = require("./lib/browser");
 
 app.setName("DronsioFlow");
 if (!app.requestSingleInstanceLock()) {
@@ -17,6 +18,7 @@ if (!app.requestSingleInstanceLock()) {
 const DATA_DIR = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "dronsioflow");
 const PYTHON = process.env.DRONSIO_PYTHON || path.join(DATA_DIR, "venv", "bin", "python");
 const NATIVE = path.join(__dirname, "native");
+const EXTENSION_DIR = path.join(__dirname, "extension");
 const USER_DIR = app.getPath("userData");
 const FILES = {
   settings: path.join(USER_DIR, "settings.json"),
@@ -79,6 +81,8 @@ const DEFAULT_SETTINGS = {
     confirmAll: false, // true: every action that changes something asks (no autonomy)
     workDirs: agent.DEFAULT_WORK_DIRS, // where files may be written without asking
     confirmPatterns: agent.DEFAULT_CONFIRM_PATTERNS, // extra commands that ask, besides the fixed rules
+    browserPort: browser.DEFAULT_PORT, // 127.0.0.1 port the browser extension connects to
+    browserToken: "", // pairing secret, part of the code pasted in the extension; made on first start
   },
   polishPresets: llm.DEFAULT_POLISH_PRESETS,
   meetingSystemAudio: true,
@@ -135,6 +139,8 @@ function mergeDefaults(saved) {
     const list = merged.agent[key];
     merged.agent[key] = Array.isArray(list) ? [...new Set(list.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()))] : DEFAULT_SETTINGS.agent[key];
   }
+  const port = Number(merged.agent.browserPort);
+  merged.agent.browserPort = Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : browser.DEFAULT_PORT;
   // The agent shortcut came after people saved their own: it gets the default only if no other
   // action (transforms included) already uses those keys; otherwise it starts without a shortcut.
   if (saved.shortcuts && !("agent" in saved.shortcuts)) {
@@ -171,6 +177,8 @@ const state = {
   // agent task, independent of the phase above: claude binary found, running, step running | confirm,
   // action { title, detail } waiting for the user's confirmation
   agent: { bin: null, running: false, step: null, action: null },
+  // the DronsioFlow browser extension: connected, browser name, extension version, port, error (port busy…)
+  browser: { connected: false, browser: null, version: null, port: null, error: null },
   capture: null, // shortcut name being recorded from the keyboard
   lastError: null,
   flash: null, // short message shown on the floating bar (e.g. the new writing style)
@@ -194,7 +202,8 @@ const USER_NAME = process.env.DRONSIO_USER_NAME ?? (() => {
 function snapshot() {
   return { state, settings, history: history.slice(0, 150), notes, meetings, stats: stats(), userName: USER_NAME, agentRules: agent.BASH_RULES,
     // why a saved work folder is ignored by the policy (null: in use), shown next to it in Settings
-    agentWorkDirProblems: (settings.agent.workDirs || []).map((d) => agent.workDirProblem(d)) };
+    agentWorkDirProblems: (settings.agent.workDirs || []).map((d) => agent.workDirProblem(d)),
+    browserCode: browser.pairingCode(settings.agent.browserPort, settings.agent.browserToken), extensionDir: EXTENSION_DIR };
 }
 
 function broadcast() {
@@ -801,7 +810,7 @@ async function stopRecording() {
   // claimed before the first await, so Esc can cancel the task while it is still being transcribed
   const job =
     mode === "agent"
-      ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve(), since: Date.now(), written: new Set(), actions: [] })
+      ? (agentJob = { cancelled: false, cancel: null, hold: null, decide: null, confirmations: Promise.resolve(), since: Date.now(), written: new Set(), actions: [], browserApproved: browser.approvals(), tabWarned: false })
       : null;
   let agentStarted = false; // from then on the job outlives this recording
   const recorded = await endRecorder();
@@ -1002,8 +1011,11 @@ const agentPolicyOptions = (job) => ({
   since: job.since,
 });
 
-/** Keeps what an allowed call did: its line in the history entry, and the files it wrote. */
-function recordAction(job, call, how) {
+/** Keeps what an allowed call did: its line in the history entry, the files it wrote, and for a browser
+ * tool the exact call, the only one the browser bridge will run (see runBrowserCall), tied to the
+ * `site` ({ tabId, origin }) the user confirmed it on. */
+function recordAction(job, call, how, site = null) {
+  if (call.tool_name.startsWith(browser.PREFIX)) job.browserApproved.allow(call.tool_name, call.tool_input, site);
   for (const p of agent.writtenPaths(call.tool_name, call.tool_input, agentPolicyOptions(job))) job.written.add(p);
   const line = agent.describeAction(call.tool_name, call.tool_input);
   if (line && job.actions.length < 300) job.actions.push({ ...line, how });
@@ -1026,14 +1038,89 @@ async function agentPermission(job, call, closed) {
   // why a command asks, shown in the dialog (the fixed rules or the user's list)
   const why = call.tool_name === "Bash" && !options.confirmAll ? agent.bashDecision(call.tool_input?.command, options).reason : null;
   logStep(`agent asks to use ${call.tool_name}`, why ? `(${why})` : "");
+  const action = agent.describeToolCall(call.tool_name, call.tool_input);
+  // an action in a tab shows the site it would run on; the approval then holds only for that tab and site
+  let site = null;
+  const tool = call.tool_name.startsWith(browser.PREFIX) ? call.tool_name.slice(browser.PREFIX.length) : null;
+  if (browser.TAB_TOOLS.includes(tool)) {
+    try {
+      site = await browserLink.call("tab_info", { tabId: call.tool_input?.tabId }, { timeoutMs: 10000 });
+    } catch (e) {
+      logStep(`agent ${call.tool_name} refused: tab unknown (${e.message})`);
+      // once per task: an agent that keeps trying would stack notifications
+      if (!job.tabWarned) notify("Ação no navegador recusada", "Não consegui confirmar em qual aba ela roda. Veja se a extensão do DronsioFlow está conectada e a aba continua aberta.");
+      job.tabWarned = true;
+      return { reason: `O DronsioFlow recusou esta ação no navegador: não conseguiu confirmar em qual aba ela roda (${e.message}). A aba pode ter sido fechada ou a extensão desconectou.` };
+    }
+    action.detail = `${agent.describeSite(site)}\n\n${action.detail}`;
+    logStep(`agent ${call.tool_name} on tab ${site.tabId} ${site.origin}`);
+  }
   const release = job.hold?.(); // the user's time to decide doesn't count against the run's timeout
   try {
-    const ok = (await askConfirmation(job, { ...agent.describeToolCall(call.tool_name, call.tool_input), why }, closed)) && !job.cancelled;
+    const ok = (await askConfirmation(job, { ...action, why }, closed)) && !job.cancelled;
     logStep(`agent ${call.tool_name} ${ok ? "confirmed" : "declined"}`);
-    if (ok) recordAction(job, call, "confirmed");
+    if (ok) recordAction(job, call, "confirmed", site && { tabId: site.tabId, origin: site.origin });
     return ok;
   } finally {
     release?.();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Browser: the DronsioFlow extension connects over a local WebSocket (lib/browser.js)
+// ---------------------------------------------------------------------------
+
+let browserLink = null;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const MIME = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", txt: "text/plain", csv: "text/csv", zip: "application/zip", mp3: "audio/mpeg", mp4: "video/mp4", wav: "audio/wav", json: "application/json" };
+
+function startBrowserLink() {
+  browserLink?.stop();
+  browserLink = browser.createBrowserLink({
+    port: settings.agent.browserPort,
+    token: settings.agent.browserToken,
+    log: logStep,
+    onChange: (status) => {
+      state.browser = status;
+      broadcast();
+    },
+  });
+  state.browser = browserLink.status();
+  browserLink.start();
+}
+
+/**
+ * One call from the browser MCP server. It runs only if the PreToolUse hook allowed this exact call
+ * (same tool, same input) moments ago: a process that reaches the bridge socket some other way, or a
+ * call the hook never saw, gets nothing.
+ */
+async function runBrowserCall(job, { tool, args }) {
+  const approval = !job.cancelled && job.browserApproved.take(browser.PREFIX + tool, args);
+  if (!approval) {
+    logStep(`agent browser ${tool} refused: not allowed by the hook`);
+    throw new Error("Ação não autorizada pelo DronsioFlow.");
+  }
+  let send = args;
+  if (tool === "file_upload") {
+    // the app reads the files the policy let through (a sensitive one never gets here) and hands them over
+    const files = [];
+    let total = 0;
+    for (const p of Array.isArray(args.paths) ? args.paths : []) {
+      if (typeof p !== "string" || !/^(\/|~\/)/.test(p) || agent.sensitivity(p, os.homedir()) === "deny") throw new Error(`Arquivo recusado: ${p}`);
+      const data = fs.readFileSync(p.replace(/^~(?=$|\/)/, os.homedir()));
+      total += data.length;
+      if (total > MAX_UPLOAD_BYTES) throw new Error("Arquivos grandes demais para enviar pelo navegador (máximo 25 MB).");
+      files.push({ name: path.basename(p), type: MIME[path.extname(p).slice(1).toLowerCase()] || "", data: data.toString("base64") });
+    }
+    send = { ref: args.ref, tabId: args.tabId, files };
+  }
+  try {
+    const out = await browserLink.call(tool, send, { expect: approval.site });
+    logStep(`agent browser ${tool} ok`);
+    return out;
+  } catch (e) {
+    logStep(`agent browser ${tool} failed: ${e.message}`);
+    throw e;
   }
 }
 
@@ -1061,16 +1148,22 @@ async function handleAgent(instruction, durationMs, job) {
   const startedAt = Date.now();
   let sessionId = null;
   let server = null;
+  let bridge = null;
   logStep(`agent start chars=${instruction.length} bin=${state.agent.bin}`);
   try {
     server = await agent.permissionServer((call, closed) => agentPermission(job, call, closed));
+    bridge = await agent.bridgeServer((call) => runBrowserCall(job, call));
     for (;;) {
       if (job.cancelled) throw Object.assign(new Error("cancelado"), { cancelled: true });
+      const link = browserLink?.status() || { connected: false };
+      logStep(`agent browser ${link.connected ? `connected: ${link.browser}` : "not connected"}`);
       const turn = agent.run({
         bin: state.agent.bin,
         prompt: instruction,
         sessionId,
         hookSocket: server.socketPath,
+        browserSocket: bridge.socketPath,
+        browser: link,
         workDirs: settings.agent.workDirs,
         confirmAll: settings.agent.confirmAll,
         timeoutMs,
@@ -1117,6 +1210,7 @@ async function handleAgent(instruction, durationMs, job) {
     notify("Falha no modo agente", e.message);
   } finally {
     server?.close();
+    bridge?.close();
   }
 }
 
@@ -1452,6 +1546,7 @@ ipcMain.handle("set-settings", (_e, patch) => {
   if ("microphone" in patch) state.mic = chooseMicrophone();
   if (patch.ai || patch.dictionary) warmFormatting();
   if (patch.agent) refreshAgentBin();
+  if (patch.agent && settings.agent.browserPort !== before.agent.browserPort) startBrowserLink();
   broadcast();
   return settings;
 });
@@ -1519,6 +1614,16 @@ ipcMain.handle("agent-confirm", (_e, id, ok) => {
 });
 ipcMain.handle("cancel-agent", () => cancelAgent());
 
+/** A new pairing code: the browser paired with the old one is disconnected until the new code is pasted. */
+ipcMain.handle("browser-new-code", () => {
+  settings.agent.browserToken = browser.newToken();
+  saveSettings();
+  browserLink?.setToken(settings.agent.browserToken);
+  logStep("browser pairing code replaced");
+  broadcast();
+});
+ipcMain.handle("open-extension-folder", () => shell.openPath(EXTENSION_DIR));
+
 /** Folder picker for the agent's work folders; a sensitive folder (~/.ssh…) is refused. */
 ipcMain.handle("pick-work-dir", async () => {
   const r = await dialog.showOpenDialog(mainWindow, { title: "Pasta de trabalho do agente", properties: ["openDirectory", "createDirectory"] });
@@ -1562,6 +1667,7 @@ app.on("second-instance", showMainWindow);
 app.on("before-quit", () => {
   quitting = true;
   cancelAgent({ force: true });
+  browserLink?.stop();
   for (const cap of [primary, backup]) cap?.proc.kill("SIGTERM");
   micWatcher?.kill("SIGTERM");
   for (const p of meetingProcs) p.kill("SIGTERM");
@@ -1574,6 +1680,11 @@ app.whenReady().then(async () => {
   nativeTheme.themeSource = settings.theme;
   refreshAgentBin();
   agent.cleanStaleDirs();
+  if (!settings.agent.browserToken) {
+    settings.agent.browserToken = browser.newToken();
+    saveSettings();
+  }
+  startBrowserLink();
   createMainWindow();
   createOverlayWindow();
   createTray();

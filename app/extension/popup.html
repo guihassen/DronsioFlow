@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>DronsioFlow</title>
+    <style>
+      :root { --bg: #f5f4f0; --fg: #1a1a1a; --muted: #6b6b6b; --line: #dcdad3; --ok: #2f8f4e; --warn: #b86e00; --accent: #4a5bd4; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #1f1f1f; --fg: #ececec; --muted: #a0a0a0; --line: #3a3a3a; --ok: #5cc27e; --warn: #e0a040; --accent: #8a98ff; } }
+      body { margin: 0; width: 320px; padding: 14px 16px; background: var(--bg); color: var(--fg); font: 13px/1.45 system-ui, sans-serif; }
+      h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+      h1 img { width: 22px; height: 22px; }
+      .status { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+      .connected .dot { background: var(--ok); }
+      .connecting .dot, .paused .dot { background: var(--warn); }
+      p { margin: 6px 0; color: var(--muted); }
+      label { display: block; margin: 12px 0 4px; font-weight: 600; }
+      input { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; font: 12px ui-monospace, monospace; }
+      .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+      button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: inherit; font: inherit; cursor: pointer; }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <h1><img src="icons/icon-48.png" alt="" />DronsioFlow</h1>
+    <div id="status" class="status"><span class="dot"></span><span id="label">…</span></div>
+    <p id="detail"></p>
+    <div id="perm" hidden>
+      <p>A extensão ainda não tem acesso aos sites. Sem ele, o agente não consegue ler nem agir nas páginas.</p>
+      <div class="row"><button id="grant" class="primary">Permitir acesso aos sites</button></div>
+    </div>
+    <label for="code">Código de pareamento</label>
+    <input id="code" placeholder="DF1-…" spellcheck="false" autocomplete="off" />
+    <p>Copie em DronsioFlow → Configurações → IA → Navegador.</p>
+    <div class="row">
+      <button id="pair" class="primary">Conectar</button>
+      <button id="reconnect" hidden>Usar este navegador</button>
+      <button id="forget" hidden>Esquecer</button>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

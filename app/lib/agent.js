@@ -5,16 +5,26 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { classifyBash, RULES: BASH_RULES } = require("./bashpolicy");
+const browser = require("./browser");
 
 const DEFAULT_WORK_DIRS = ["~/Documentos", "~/Downloads", "/tmp"];
 const DEFAULT_CONFIRM_PATTERNS = ["docker rm", "docker rmi", "docker system prune", "kubectl delete", "terraform apply", "terraform destroy"];
 
+/** What the agent is told about the browser: which one is connected, or to stop if the task needs it. */
+function browserPrompt(status) {
+  if (!status?.connected)
+    return `A extensão do DronsioFlow NÃO está conectada a nenhum navegador agora. Se a tarefa precisar do navegador (abrir um site, ler uma página, mandar mensagem pela web), não comece nada, nem pelo terminal, e responda somente: ${browser.NOT_CONNECTED}`;
+  return `A extensão do DronsioFlow está conectada ao ${status.browser || "navegador"} do usuário: as abas são as reais, com os logins dele. Trabalhe numa aba nova (tab_create) ou na que ele pediu, sem fechar nem mexer nas outras.`;
+}
+
 /** The agent's instructions; `workDirs` tells it where it may write without asking. */
-function systemPrompt({ workDirs = DEFAULT_WORK_DIRS, confirmAll = false } = {}) {
+function systemPrompt({ workDirs = DEFAULT_WORK_DIRS, confirmAll = false, browser: status = null } = {}) {
   const autonomy = confirmAll
     ? "O DronsioFlow mostra ao usuário cada ação que altera algo (comandos no terminal, criação ou edição de arquivos, cliques, digitação e scripts no navegador) e só deixa executar o que ele confirmar."
-    : `Você pode agir sozinho: navegar, clicar e digitar no Chrome, rodar comandos e criar ou editar arquivos nas pastas de trabalho (${workDirs.join(", ")}). Prefira essas pastas para arquivos novos. O DronsioFlow não sabe em que pasta o terminal está entre um comando e outro, então sempre diga a pasta no próprio comando: git -C <pasta absoluta> … (ou cd <pasta absoluta> && … no mesmo comando) e caminhos absolutos para gravar ou executar arquivos; sem isso, ele pede confirmação. O DronsioFlow pede a confirmação do usuário, sozinho, para o que é arriscado: apagar, instalar, mexer no sistema, publicar ou enviar pelo terminal, gravar fora das pastas de trabalho, rodar código inline ou scripts criados nesta tarefa, e JavaScript na página.`;
-  return `Você é o agente de voz do DronsioFlow. O usuário falou uma tarefa (transcrita por reconhecimento de voz, então pode haver pequenos erros de transcrição) e você deve executá-la no computador e no navegador dele, usando o Chrome (ferramentas do Claude in Chrome) e o terminal quando precisar.
+    : `Você pode agir sozinho: navegar, clicar e digitar no navegador, rodar comandos e criar ou editar arquivos nas pastas de trabalho (${workDirs.join(", ")}). Prefira essas pastas para arquivos novos. O DronsioFlow não sabe em que pasta o terminal está entre um comando e outro, então sempre diga a pasta no próprio comando: git -C <pasta absoluta> … (ou cd <pasta absoluta> && … no mesmo comando) e caminhos absolutos para gravar ou executar arquivos; sem isso, ele pede confirmação. O DronsioFlow pede a confirmação do usuário, sozinho, para o que é arriscado: apagar, instalar, mexer no sistema, publicar ou enviar pelo terminal, gravar fora das pastas de trabalho, rodar código inline ou scripts criados nesta tarefa, e JavaScript na página.`;
+  return `Você é o agente de voz do DronsioFlow. O usuário falou uma tarefa (transcrita por reconhecimento de voz, então pode haver pequenos erros de transcrição) e você deve executá-la no computador e no navegador dele, usando o terminal e as ferramentas do navegador quando precisar.
+
+Para qualquer coisa num site, use só as ferramentas do navegador (mcp__${browser.SERVER_NAME}__*: tabs_list, tab_create, navigate, read_page, find, click, type, key…). Nunca abra páginas nem o navegador pelo terminal (xdg-open, gio open, firefox, flatpak run…): o DronsioFlow não controla o que abrir assim. ${browserPrompt(status)}
 
 ${autonomy} Se uma ação for recusada, não tente fazê-la de outro jeito: termine dizendo o que não foi feito.
 
@@ -35,24 +45,24 @@ const SYSTEM_PROMPT = systemPrompt();
 // - --disallowedTools removes, as a second layer, tools that act outside this computer or this task
 //   (messages to other sessions, remote triggers, schedules, worktrees, skills, the claude.ai account
 //   connectors) and reading sensitive files;
+// - the only MCP server is the app's own browser server (--strict-mcp-config): the user's other MCP
+//   servers and Claude in Chrome (--no-chrome) are left out. The browser server runs a call only when
+//   this hook allowed that exact call (main.js), so no browser action skips the policy;
 // - --setting-sources "" ignores ~/.claude/settings.json and project settings, so the user's own
 //   permissions.allow or defaultMode can't widen this. Login lives in ~/.claude.json and the
 //   credentials file, not in settings, so the account keeps working;
 // - never --dangerously-skip-permissions.
-const CHROME = "mcp__claude-in-chrome__";
+const BROWSER = browser.PREFIX;
 const READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "WebSearch"];
 // the agent's own bookkeeping; subagents (Task/Agent) go through the same hook for each of their calls
 const AGENT_TOOLS = ["Task", "Agent", "ToolSearch", "TodoWrite", "TaskStop"];
-const READ_ONLY_CHROME = [
-  "read_page", "get_page_text", "find", "navigate", "tabs_context_mcp", "tabs_create_mcp", "list_connected_browsers",
-  "select_browser", "switch_browser", "read_console_messages", "read_network_requests", "shortcuts_list", "resize_window",
-];
-// `computer` both looks (screenshot, zoom) and acts (click, type, key…): only looking skips the confirmation.
-const READ_ONLY_COMPUTER = ["screenshot", "zoom"];
+// looking at pages and moving between them; clicking, typing and the rest change something
+const READ_ONLY_BROWSER = browser.READ_ONLY;
 const DISALLOWED_TOOLS = [
   "SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
   "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill",
   "mcp__claude_ai_*", // every claude.ai account connector (Docs, Gmail…); the CLI matches the prefix
+  "mcp__claude-in-chrome__*", // replaced by the app's own browser extension
 ];
 // Never read, not even with confirmation: keys, tokens, browser profiles, the app's and Claude's own data.
 const SENSITIVE_DIRS = [".ssh", ".gnupg", ".claude", ".config", ".local/share/keyrings", ".mozilla"];
@@ -69,13 +79,14 @@ const DISALLOWED_READS = [
 ];
 const HOOK_MATCHER = "*"; // every tool
 const HOOK_SCRIPT = path.join(__dirname, "..", "native", "agent_hook.js");
+const BROWSER_SCRIPT = path.join(__dirname, "..", "native", "browser_mcp.js");
 const CONFIRM_TIMEOUT_MS = 5 * 60 * 1000; // the user's answer to one confirmation
 const HOOK_TIMEOUT_S = CONFIRM_TIMEOUT_MS / 1000 + 60; // longer, so the dialog's timeout always wins
 
 const PERMISSION_ARGS = [
   "--permission-mode", "default",
   "--setting-sources", "",
-  "--allowedTools", [...READ_ONLY_TOOLS, ...READ_ONLY_CHROME.map((t) => CHROME + t)].join(","),
+  "--allowedTools", [...READ_ONLY_TOOLS, ...READ_ONLY_BROWSER.map((t) => BROWSER + t)].join(","),
   "--disallowedTools", [...DISALLOWED_TOOLS, ...DISALLOWED_READS].join(","),
 ];
 
@@ -206,14 +217,17 @@ function toolPolicy(name, input, opts = {}) {
   // anywhere else ("remote"…) it would escape it
   if ((name === "Task" || name === "Agent") && input?.isolation != null && input.isolation !== "worktree") return "confirm";
   if (READ_ONLY_TOOLS.includes(name) || AGENT_TOOLS.includes(name)) return "allow";
-  if (name.startsWith(CHROME)) {
-    const tool = name.slice(CHROME.length);
-    if (READ_ONLY_CHROME.includes(tool)) return "allow";
-    if (tool === "computer" && READ_ONLY_COMPUTER.includes(input?.action)) return "allow";
+  if (name.startsWith(BROWSER)) {
+    const tool = name.slice(BROWSER.length);
+    if (!browser.TOOL_NAMES.includes(tool)) return "confirm";
+    // only web pages: a javascript: or file: address would run code or read files without asking
+    if ((tool === "navigate" || tool === "tab_create") && input?.url != null && !webAddress(input.url, tool)) return "confirm";
+    if (READ_ONLY_BROWSER.includes(tool)) return "allow";
     if (confirmAll) return "confirm";
     // JavaScript runs arbitrary code inside the logged-in page (cookies, sessions): always shown
-    if (tool === "javascript_tool" || (tool === "browser_batch" && /javascript/i.test(JSON.stringify(input ?? {})))) return "confirm";
-    // files from this computer leaving through the page (file_upload, or inside a batch)
+    if (tool === "javascript") return "confirm";
+    // files from this computer leaving through the page (file_upload); a relative path can't be checked
+    if (tool === "file_upload" && !(Array.isArray(input?.paths) && input.paths.every((p) => typeof p === "string" && /^(\/|~(\/|$))/.test(p)))) return "confirm";
     const ctx = policyContext(opts);
     const decisions = inputPaths(input).map((p) => writeDecision(p, ctx));
     if (decisions.includes("deny")) return "deny";
@@ -224,6 +238,16 @@ function toolPolicy(name, input, opts = {}) {
   if (WRITE_TOOLS.includes(name)) return writeDecision(writePath(name, input), policyContext(opts));
   if (name === "Bash") return classifyBash(input?.command, policyContext(opts)).decision;
   return "confirm";
+}
+
+/** An http(s) address (or back/forward for navigate): the only places the browser tools go without asking. */
+function webAddress(url, tool) {
+  if (tool === "navigate" && (url === "back" || url === "forward")) return true;
+  try {
+    return ["http:", "https:"].includes(new URL(String(url)).protocol);
+  } catch {
+    return false;
+  }
 }
 
 /** Bash's decision with its reason, for the log and the dialog. */
@@ -248,28 +272,34 @@ const fields = (input, skip = []) =>
     .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join("\n");
 
-const COMPUTER_ACTIONS = {
-  left_click: "Clicar no Chrome", right_click: "Clicar com o botão direito no Chrome", double_click: "Dar duplo clique no Chrome",
-  triple_click: "Dar triplo clique no Chrome", type: "Digitar no Chrome", key: "Pressionar teclas no Chrome",
-  scroll: "Rolar a página no Chrome", scroll_to: "Rolar a página no Chrome", left_click_drag: "Arrastar no Chrome", hover: "Passar o mouse no Chrome",
+const BROWSER_ACTIONS = {
+  click: "Clicar no navegador", type: "Digitar no navegador", key: "Pressionar teclas no navegador", scroll: "Rolar a página no navegador",
+  form_input: "Preencher um campo no navegador", tab_close: "Fechar uma aba do navegador", file_upload: "Enviar arquivos pelo navegador",
+  javascript: "Rodar JavaScript na página do navegador",
 };
+const CLICK_BUTTONS = { right: "Clicar com o botão direito no navegador", double: "Dar duplo clique no navegador" };
 
 /** One history line for an action that changed something (null for reading and bookkeeping). */
 function describeAction(name, input = {}) {
-  const tool = name.startsWith(CHROME) ? name.slice(CHROME.length) : null;
-  if (tool ? READ_ONLY_CHROME.includes(tool) && tool !== "navigate" && tool !== "tabs_create_mcp" : !["Bash", ...WRITE_TOOLS].includes(name)) return null;
-  if (tool === "computer" && READ_ONLY_COMPUTER.includes(input.action)) return null;
+  const tool = name.startsWith(BROWSER) ? name.slice(BROWSER.length) : null;
+  if (tool ? READ_ONLY_BROWSER.includes(tool) && tool !== "navigate" && !(tool === "tab_create" && input.url) : !["Bash", ...WRITE_TOOLS].includes(name)) return null;
   if (name === "Bash") return { tool: name, text: clip(input.command, 600) };
   if (WRITE_TOOLS.includes(name)) return { tool: name, text: `${name === "Write" ? "Gravou" : "Editou"} ${writePath(name, input)}` };
-  if (tool === "navigate") return { tool: name, text: `Abriu ${input.url}` };
+  if (tool === "navigate" || tool === "tab_create") return { tool: name, text: `Abriu ${input.url}` };
   const d = describeToolCall(name, input);
   return { tool: name, text: clip(`${d.title}: ${String(d.detail).replace(/\s*\n\s*/g, " · ")}`, 300) };
 }
 
+/** The dialog's line for the tab a browser action runs in ({ tabId, origin, title } from the extension). */
+function describeSite(site) {
+  const title = String(site?.title || "").replace(/\s+/g, " ").trim();
+  return `Site: ${site?.origin || "desconhecido"} — ${title ? clip(title, 80).replace(/\n.*/s, "…") : "(sem título)"} (aba ${site?.tabId})`;
+}
+
 /** What the confirmation dialog shows: the call itself (command, path and content, click target, typed text). */
 function describeToolCall(name, input = {}) {
-  const tool = name.startsWith(CHROME) ? name.slice(CHROME.length) : name;
-  switch (name.startsWith(CHROME) ? `chrome:${tool}` : tool) {
+  const tool = name.startsWith(BROWSER) ? name.slice(BROWSER.length) : name;
+  switch (name.startsWith(BROWSER) ? `browser:${tool}` : tool) {
     case "Bash":
       return { title: "Executar um comando no terminal", detail: clip(input.command, 4000) };
     case "Write":
@@ -288,14 +318,17 @@ function describeToolCall(name, input = {}) {
       return { title: "Buscar uma página da web", detail: `${input.url}\n\nPara: ${clip(input.prompt, 1000)}` };
     case "NotebookEdit":
       return { title: "Editar um notebook", detail: `${input.notebook_path} (${input.edit_mode || "replace"})\n\n${clip(input.new_source, 1500)}` };
-    case "chrome:computer":
-      return { title: COMPUTER_ACTIONS[input.action] || `Ação no Chrome: ${input.action}`, detail: clip(fields(input, ["tabId"]), 2000) };
-    case "chrome:form_input":
-      return { title: "Preencher um campo no Chrome", detail: clip(fields(input, ["tabId"]), 2000) };
-    case "chrome:javascript_tool":
-      return { title: "Rodar JavaScript na página do Chrome", detail: clip(input.text ?? fields(input, ["tabId"]), 3000) };
+    case "browser:javascript":
+      return { title: BROWSER_ACTIONS.javascript, detail: clip(input.code ?? fields(input, ["tabId"]), 3000) };
+    case "browser:type":
+      return { title: BROWSER_ACTIONS.type, detail: clip(`${input.text}${input.ref ? `\n\nem ${input.ref}` : ""}`, 2000) };
+    case "browser:navigate":
+    case "browser:tab_create":
+      return { title: "Abrir uma página no navegador", detail: clip(String(input.url ?? "nova aba"), 2000) };
     default:
-      return { title: `Usar a ferramenta ${name.startsWith(CHROME) ? `${tool} do Chrome` : tool}`, detail: clip(fields(input, ["tabId"]), 2000) };
+      if (name.startsWith(BROWSER))
+        return { title: (tool === "click" && CLICK_BUTTONS[input.button]) || BROWSER_ACTIONS[tool] || `Usar a ferramenta ${tool} do navegador`, detail: clip(fields(input, ["tabId"]), 2000) };
+      return { title: `Usar a ferramenta ${tool}`, detail: clip(fields(input, ["tabId"]), 2000) };
   }
 }
 
@@ -329,12 +362,11 @@ function cleanStaleDirs(maxAgeMs = 24 * 60 * 60 * 1000) {
 
 /**
  * Unix socket the hook asks, in a private temporary directory (0700, socket 0600).
- * onRequest({ tool_name, tool_input }, closed) resolves true to allow; `closed` settles when the hook
+ * onRequest({ tool_name, tool_input }, closed) resolves true to allow, or { reason } to deny saying why
+ * (anything else denies); `closed` settles when the hook
  * hung up (Claude Code killed it), so a pending dialog can be dropped. Returns { socketPath, close }.
  */
 async function permissionServer(onRequest) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX));
-  const socketPath = path.join(dir, "hook.sock");
   const server = net.createServer((conn) => {
     let buf = "";
     let asked = false;
@@ -346,13 +378,53 @@ async function permissionServer(onRequest) {
       if (asked || i < 0) return;
       asked = true;
       let allow = false;
+      let reason;
       try {
         const call = JSON.parse(buf.slice(0, i));
-        allow = typeof call.tool_name === "string" && (await onRequest(call, closed)) === true;
+        const out = typeof call.tool_name === "string" ? await onRequest(call, closed) : null;
+        allow = out === true;
+        if (!allow && typeof out?.reason === "string") reason = out.reason;
       } catch {}
-      if (!conn.destroyed) conn.end(JSON.stringify({ allow }) + "\n");
+      if (!conn.destroyed) conn.end(JSON.stringify({ allow, reason }) + "\n");
     });
   });
+  return listenPrivate(server, "hook.sock");
+}
+
+/**
+ * Unix socket the browser MCP server (native/browser_mcp.js) sends each tool call to, like the hook's.
+ * onCall({ tool, args }) resolves with { text, image? } or throws; the reply line is
+ * { ok, text, image } or { ok: false, error }. Returns { socketPath, close }.
+ */
+async function bridgeServer(onCall) {
+  const server = net.createServer((conn) => {
+    let buf = "";
+    let asked = false;
+    conn.on("error", () => {});
+    conn.on("data", async (d) => {
+      buf += d.toString("utf8");
+      const i = buf.indexOf("\n");
+      if (asked || i < 0) return;
+      asked = true;
+      let reply;
+      try {
+        const call = JSON.parse(buf.slice(0, i));
+        if (typeof call.tool !== "string") throw new Error("chamada inválida");
+        const out = await onCall({ tool: call.tool, args: call.args && typeof call.args === "object" ? call.args : {} });
+        reply = { ok: true, text: String(out?.text ?? ""), image: out?.image || null };
+      } catch (e) {
+        reply = { ok: false, error: e.message };
+      }
+      if (!conn.destroyed) conn.end(JSON.stringify(reply) + "\n");
+    });
+  });
+  return listenPrivate(server, "browser.sock");
+}
+
+/** Listens on `name` in a new private temporary directory (0700, socket 0600). Returns { socketPath, close }. */
+async function listenPrivate(server, name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), TMP_PREFIX));
+  const socketPath = path.join(dir, name);
   try {
     await new Promise((resolve, reject) => {
       server.once("error", reject);
@@ -391,9 +463,20 @@ function findClaude(configured) {
   return isExecutable(local) ? local : null;
 }
 
-/** Arguments for a new task, or for resuming `sessionId` after the user confirmed. */
-function buildArgs({ prompt, sessionId, hookSocket, workDirs, confirmAll }) {
-  const args = ["-p", "--chrome", "--output-format", "stream-json", "--verbose", "--append-system-prompt", systemPrompt({ workDirs, confirmAll }), ...PERMISSION_ARGS];
+/** `--mcp-config` with the app's browser server, run by the app's own runtime like the hook. */
+function mcpConfig(browserSocket) {
+  const server = { type: "stdio", command: process.execPath, args: [BROWSER_SCRIPT, browserSocket], env: { ELECTRON_RUN_AS_NODE: "1" } };
+  return JSON.stringify({ mcpServers: { [browser.SERVER_NAME]: server } });
+}
+
+/**
+ * Arguments for a new task, or for resuming `sessionId` after the user confirmed. `browser` is the
+ * extension's status ({ connected, browser }) for the prompt; browserSocket the bridge for its tools.
+ */
+function buildArgs({ prompt, sessionId, hookSocket, browserSocket, browser: status, workDirs, confirmAll }) {
+  const args = ["-p", "--no-chrome", "--output-format", "stream-json", "--verbose", "--append-system-prompt", systemPrompt({ workDirs, confirmAll, browser: status }), ...PERMISSION_ARGS];
+  args.push("--strict-mcp-config"); // no MCP server but the app's own
+  if (browserSocket) args.push("--mcp-config", mcpConfig(browserSocket));
   // without the hook, the tools that change something just stay denied
   if (hookSocket) args.push("--settings", hookSettings(hookSocket));
   if (sessionId) args.push("--resume", sessionId);
@@ -436,8 +519,8 @@ function confirmationRequest(answer) {
  * Returns { promise, cancel(force), hold }: hold() pauses the timeout (while the user is deciding a
  * confirmation) until the function it returns is called.
  */
-function run({ bin, prompt, sessionId, hookSocket, workDirs, confirmAll, timeoutMs, cwd = os.homedir(), onEvent }) {
-  const child = spawn(bin, buildArgs({ prompt, sessionId, hookSocket, workDirs, confirmAll }), { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
+function run({ bin, prompt, sessionId, hookSocket, browserSocket, browser: status, workDirs, confirmAll, timeoutMs, cwd = os.homedir(), onEvent }) {
+  const child = spawn(bin, buildArgs({ prompt, sessionId, hookSocket, browserSocket, browser: status, workDirs, confirmAll }), { cwd, stdio: ["ignore", "pipe", "pipe"], detached: true });
   let cancelled = false;
   let timedOut = false;
   let exited = false;
@@ -534,7 +617,9 @@ module.exports = {
   confirmationRequest,
   toolPolicy,
   describeToolCall,
+  describeSite,
   cleanStaleDirs,
   permissionServer,
+  bridgeServer,
   run,
 };
