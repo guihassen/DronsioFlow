@@ -4,8 +4,8 @@
 // including a missing socket, a closed connection or a malformed answer (fail closed).
 const net = require("net");
 
-const DENIED =
-  "O usuário não autorizou esta ação no DronsioFlow. Não tente fazê-la de outro jeito; termine dizendo o que não foi feito.";
+const GIVE_UP = "Não tente fazê-la de outro jeito; termine dizendo o que não foi feito.";
+const DENIED = `O usuário não autorizou esta ação no DronsioFlow. ${GIVE_UP}`;
 
 let answered = false;
 function answer(allow, reason) {
@@ -34,6 +34,7 @@ function ask(call) {
     } catch {}
     sock.destroy();
     if (reply?.allow === true) answer(true, "Confirmado pelo usuário no DronsioFlow.");
+    else if (typeof reply?.reason === "string" && reply.reason) answer(false, `${reply.reason.slice(0, 300)} ${GIVE_UP}`);
     else answer(false, DENIED);
   });
   sock.on("error", (e) => answer(false, `DronsioFlow indisponível (${e.code || e.message}). ${DENIED}`));

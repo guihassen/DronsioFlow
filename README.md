@@ -165,8 +165,9 @@ mouse ou o teclado em qualquer app.
 ### Modo agente
 
 Segure **Ctrl + Super + Shift**, fale uma tarefa e solte: a instrução transcrita vai para o
-[Claude Code](https://claude.com/claude-code) instalado no computador, que a executa usando o Chrome (integração
-Claude in Chrome) e o terminal. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
+[Claude Code](https://claude.com/claude-code) instalado no computador, que a executa usando o terminal e o seu
+navegador, pela [extensão do DronsioFlow](#extensão-do-navegador) (Firefox, Zen, LibreWolf, Chrome, Brave, Edge),
+com as abas e os logins que você já usa. Exemplo: "abra o navegador, vá no WhatsApp Web e mande uma mensagem para a Amanda
 perguntando como ela está".
 
 - **Autonomia com limites**: **toda** chamada de ferramenta passa pela checagem do app antes de executar
@@ -175,8 +176,8 @@ perguntando como ela está".
 
   | | O que entra |
   |---|---|
-  | **Automático** | ler arquivos e páginas, pesquisar; **no Chrome**, navegar, clicar, digitar, teclas, preencher campos e rolar, em qualquer site; **criar e editar arquivos** dentro das pastas de trabalho (padrão `~/Documentos`, `~/Downloads` e `/tmp`); **comandos no terminal** que não caem em nenhuma regra abaixo (`ls`, `git status/add/commit`, `npm test`, `mkdir`, `cp`/`mv` dentro das pastas de trabalho…) |
-  | **Confirmar** | **envio em nome do usuário** no navegador (mensagem, e-mail, post, formulário, compra), pela regra `CONFIRMAR:` (veja abaixo); criar ou editar arquivos fora das pastas de trabalho, arquivos ocultos da home (mesmo dentro delas) e `.git`; JavaScript na página (`javascript_tool`: roda código na sua sessão logada); enviar pelo Chrome um arquivo de fora das pastas de trabalho (`file_upload`); WebFetch, subagente remoto e ferramentas desconhecidas; comandos que **apagam** (`rm`, `find -delete`, `git clean`, `git reset --hard`, a lixeira com `gio trash`/`gio remove`/`trash-put`/`kioclient`, `tar --remove-files`, `zip -m`…), **mexem no sistema** (`sudo`, instalar/remover pacotes, `systemctl`, `kill`, `dd`, `chmod -R`, `chmod`/`setfacl` fora das pastas, `crontab`, `dconf`, `gsettings set`, `nmcli connection modify/delete/down`, `rfkill`, `loginctl`, `hostnamectl`, `timedatectl`, `git pull/merge/rebase/checkout…` fora das pastas, gravar fora das pastas de trabalho, inclusive com `sort -o`, `split`, `convert` ou `ffmpeg`…), **publicam ou enviam** (`git push`, `gh pr create`, `ssh`/`scp`, `rsync host:`, `curl -d/-F/-T/-X POST`, `nc`, servidores como `python -m http.server`, `php -S`, `npx serve`, `busybox httpd`…), mexem em **segredos** (`secret-tool`, `git credential`, `gpg --export-secret-keys`, `pass`/`gopass`/`bw`/`op`/`lpass`/`keepassxc-cli`, `nmcli --show-secrets`, `keyctl`, `kwallet-query`, e `printenv`/`env`/`set`/`export -p`/`declare -p`, que mostram os tokens do ambiente) ou usam **brechas** (`bash -c`, `python -c`, `node -e`, `eval`, pipe para um interpretador, `$(…)` e crases, rodar um arquivo criado ou alterado na tarefa, programas que rodam outro comando (`xargs`, `find -exec`, `tmux`, `screen`, terminais com `-e`/`--`, `strace`, `gdb`, `docker exec`/`run -v`, `vim -c`, `busybox`, `script -c`…) com um comando da lista, `alias`/funções, `source` de fora das pastas, caminhos sensíveis, também por curinga (`~/.s*/id*`, `/home/*/.ssh`) ou por variável (`K=~/.ssh/id_rsa; cat $K`), variável de valor desconhecido num argumento, `>` para fora das pastas, variáveis como `PATH`); e os padrões extras da sua lista |
+  | **Automático** | ler arquivos e páginas, pesquisar; **no navegador**, abrir abas, navegar, clicar, digitar, teclas, preencher campos, rolar e fechar abas, em qualquer site; **criar e editar arquivos** dentro das pastas de trabalho (padrão `~/Documentos`, `~/Downloads` e `/tmp`); **comandos no terminal** que não caem em nenhuma regra abaixo (`ls`, `git status/add/commit`, `npm test`, `mkdir`, `cp`/`mv` dentro das pastas de trabalho…) |
+  | **Confirmar** | **envio em nome do usuário** no navegador (mensagem, e-mail, post, formulário, compra), pela regra `CONFIRMAR:` (veja abaixo); criar ou editar arquivos fora das pastas de trabalho, arquivos ocultos da home (mesmo dentro delas) e `.git`; JavaScript na página (`javascript`: roda código na sua sessão logada); abrir no navegador um endereço que não seja `http`/`https` (`javascript:`, `file:`…); enviar pelo navegador um arquivo de fora das pastas de trabalho (`file_upload`); abrir o navegador, uma página ou um aplicativo **pelo terminal** (`xdg-open https://…` ou de uma página, `gio open file://…`, `gtk-launch`, `gio launch`, `gapplication launch`/`action`, `dex`, `kstart`, `kioclient exec`, `firefox`, `flatpak run` de um navegador…), que escaparia da extensão. `xdg-open`, `gio open` e `kde-open` só passam direto para uma pasta ou um arquivo que já existia antes da tarefa com uma destas extensões: `pdf`, imagens (`png`, `jpg`, `jpeg`, `gif`, `webp`, `bmp`, `tif`, `tiff`, `avif`, `heic`), documentos (`odt`, `ods`, `odp`, `doc`, `docx`, `xls`, `xlsx`, `ppt`, `pptx`, `txt`, `csv`, `epub`), áudio (`mp3`, `ogg`, `oga`, `opus`, `flac`, `wav`, `m4a`) e vídeo (`mp4`, `mkv`, `webm`, `avi`, `mov`). Qualquer outro arquivo pede confirmação, inclusive um sem extensão (o GNOME descobre o tipo pelo conteúdo e pode abrir um HTML no navegador) ou um atalho cujo destino não tenha uma dessas extensões. Se o DronsioFlow não conseguir confirmar em qual aba uma ação do navegador rodaria (a aba foi fechada ou a extensão desconectou), ele recusa a ação, avisa você com uma notificação e diz o motivo ao agente; WebFetch, subagente remoto e ferramentas desconhecidas; comandos que **apagam** (`rm`, `find -delete`, `git clean`, `git reset --hard`, a lixeira com `gio trash`/`gio remove`/`trash-put`/`kioclient`, `tar --remove-files`, `zip -m`…), **mexem no sistema** (`sudo`, instalar/remover pacotes, `systemctl`, `kill`, `dd`, `chmod -R`, `chmod`/`setfacl` fora das pastas, `crontab`, `dconf`, `gsettings set`, `nmcli connection modify/delete/down`, `rfkill`, `loginctl`, `hostnamectl`, `timedatectl`, `git pull/merge/rebase/checkout…` fora das pastas, gravar fora das pastas de trabalho, inclusive com `sort -o`, `split`, `convert` ou `ffmpeg`…), **publicam ou enviam** (`git push`, `gh pr create`, `ssh`/`scp`, `rsync host:`, `curl -d/-F/-T/-X POST`, `nc`, servidores como `python -m http.server`, `php -S`, `npx serve`, `busybox httpd`…), mexem em **segredos** (`secret-tool`, `git credential`, `gpg --export-secret-keys`, `pass`/`gopass`/`bw`/`op`/`lpass`/`keepassxc-cli`, `nmcli --show-secrets`, `keyctl`, `kwallet-query`, e `printenv`/`env`/`set`/`export -p`/`declare -p`, que mostram os tokens do ambiente) ou usam **brechas** (`bash -c`, `python -c`, `node -e`, `eval`, pipe para um interpretador, `$(…)` e crases, rodar um arquivo criado ou alterado na tarefa, programas que rodam outro comando (`xargs`, `find -exec`, `tmux`, `screen`, terminais com `-e`/`--`, `strace`, `gdb`, `docker exec`/`run -v`, `vim -c`, `busybox`, `script -c`…) com um comando da lista, `alias`/funções, `source` de fora das pastas, caminhos sensíveis, também por curinga (`~/.s*/id*`, `/home/*/.ssh`) ou por variável (`K=~/.ssh/id_rsa; cat $K`), variável de valor desconhecido num argumento, `>` para fora das pastas, variáveis como `PATH`); e os padrões extras da sua lista |
   | **Bloqueado** | ler ou gravar arquivos sensíveis (abaixo), `/proc`, ferramentas desligadas (abaixo) e os conectores da conta claude.ai |
 
   Comandos compostos (`;`, `&&`, `||`, `|`, quebras de linha, `if`/`for`) são analisados parte por parte, e qualquer
@@ -208,7 +209,7 @@ perguntando como ela está".
 - **Ferramentas que agem fora desta tarefa ficam desligadas**: mensagens para outras sessões, gatilhos remotos,
   agendamentos, notificações push, worktrees, skills e todos os conectores da conta claude.ai (`mcp__claude_ai_*`).
   Subagentes rodam livres só aqui ou numa worktree local; um subagente remoto pede confirmação.
-- **Risco residual aceito**: abrir uma página no Chrome (`navigate`) não pede confirmação. Como o Chrome usa as suas
+- **Risco residual aceito**: abrir uma página no navegador (`navigate`) não pede confirmação. Como ele usa as suas
   sessões logadas, um link que faz algo só por ser aberto (um GET com efeito, como "confirmar inscrição" ou
   "descadastrar") seria seguido sem perguntar, e a URL aberta pode levar dados para fora dentro dela.
 - **Envio em nome do usuário**: antes de mandar mensagem ou e-mail, publicar, enviar formulário ou comprar, o agente
@@ -223,9 +224,13 @@ perguntando como ela está".
 - A resposta final aparece numa notificação e fica no histórico marcada como **Agente** (e conta em Estatísticas).
 - Como no modo comando, dá para começar no "segurar para falar" e adicionar Shift.
 - Requer o Claude Code instalado e logado (`claude` no PATH ou em `~/.local/bin/claude`) e, para o navegador, a
-  extensão Claude in Chrome conectada. Sem o Claude Code, o atalho só mostra um aviso.
+  [extensão do DronsioFlow](#extensão-do-navegador) conectada. Sem o Claude Code, o atalho só mostra um aviso. Sem a
+  extensão, o agente faz o que não precisa do navegador; se a tarefa precisar dele, não começa nada e responde
+  "Conecte a extensão do DronsioFlow no seu navegador…".
 - Em **Configurações → IA → Modo agente**: liga/desliga (vem ligado se o `claude` for encontrado), caminho do
-  binário e tempo máximo de cada etapa (padrão 10 min). Em **Autonomia do agente**: **Confirmar tudo** (desligado
+  binário e tempo máximo de cada etapa (padrão 10 min). Em **Navegador**: o estado da extensão (conectada, em qual
+  navegador), o código de pareamento (mostrar, copiar, gerar um novo), o botão que abre a pasta da extensão e a porta
+  local (padrão 47615). Em **Autonomia do agente**: **Confirmar tudo** (desligado
   por padrão; ligado, volta à política antiga, em que tudo que altera algo pede confirmação), as **pastas de
   trabalho** (adicionar com o seletor de pastas, remover; pastas sensíveis ou amplas demais, como a pasta pessoal inteira, `/`,
   `/home`, `/etc` ou `/usr`, são recusadas) e os **comandos que pedem confirmação**: as regras fixas,
@@ -239,6 +244,60 @@ perguntando como ela está".
   apagadas na abertura seguinte depois de um dia. Com `--setting-sources ""`, as permissões do seu `~/.claude/settings.json`
   (`permissions.allow`, `defaultMode`) e os hooks e configurações do projeto não valem para o agente; o login da
   conta continua funcionando (fica fora desses arquivos). Nunca `--dangerously-skip-permissions`.
+- O navegador entra como um servidor MCP do próprio app (`app/native/browser_mcp.js`, ferramentas
+  `mcp__dronsio_browser__*`), passado com `--mcp-config` e `--strict-mcp-config`: outros servidores MCP do seu Claude
+  Code e o Claude in Chrome (`--no-chrome`) ficam de fora. Esse servidor não tem poder próprio: cada chamada vai ao app
+  por outro socket Unix privado, e o app só a executa se o hook acabou de permitir **aquela mesma chamada** (mesma
+  ferramenta, mesmos parâmetros, uma vez, por até 2 minutos). Assim nenhuma ação no navegador escapa da política,
+  nem se outro processo achar o socket.
+
+#### Extensão do navegador
+
+Um único código (WebExtension MV3, em `app/extension/`) para Firefox, Zen, LibreWolf, Chrome, Brave e Edge. Ela
+controla o navegador que você já usa, sem reiniciá-lo, e só conversa com o DronsioFlow neste computador.
+
+1. **Instale a extensão**:
+   - **Zen, LibreWolf, Firefox Developer Edition/Nightly/ESR**: em `about:config`, mude
+     `xpinstall.signatures.required` para `false`. Depois, em `about:addons` → engrenagem → **Instalar extensão de um
+     arquivo…**, escolha `~/.local/opt/dronsioflow/dronsioflow-extension.xpi` (criado pelo `./install.sh`). Fica
+     instalada de vez. O Zen em Flatpak funciona normalmente: ele tem acesso à rede local, e o seletor de arquivos do
+     Flatpak deixa escolher o `.xpi`.
+     **Atenção:** com `xpinstall.signatures.required` em `false`, esse navegador passa a aceitar **qualquer** extensão
+     não assinada, não só a do DronsioFlow. Instale extensões só de fontes em que você confia.
+   - **Firefox normal (versão estável)**: ele só instala de vez extensões assinadas pela Mozilla, e o DronsioFlow
+     não envia nada para a Mozilla. Para usar mesmo assim, carregue temporariamente: `about:debugging` → **Este
+     Firefox** → **Carregar extensão temporária…** → escolha o `manifest.json` da pasta da extensão. Ela some quando o
+     Firefox fecha. (Assinar a extensão como "não listada" no addons.mozilla.org resolveria isso, mas exige enviar o
+     código à Mozilla; não é feito.)
+   - **Chrome, Brave, Edge**: abra `chrome://extensions` (ou `brave://extensions`, `edge://extensions`), ligue o
+     **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta da extensão.
+
+   A pasta da extensão é `~/.local/opt/dronsioflow/resources/app/extension` (o botão **Abrir pasta da extensão** em
+   Configurações → IA → Navegador abre ela).
+2. **Pareie**: em Configurações → IA → Navegador, copie o **código de pareamento**. Clique no ícone do DronsioFlow na
+   barra do navegador, cole o código e clique em **Conectar**. A extensão guarda o código e se reconecta sozinha
+   quando o navegador ou o DronsioFlow abrem de novo. No Firefox, se aparecer o aviso de acesso aos sites, clique em
+   **Permitir acesso aos sites**.
+
+Segurança e limites:
+- A conexão é um WebSocket em `127.0.0.1` (nunca na rede). O app recusa conexões com origem que não seja uma extensão
+  (`moz-extension://`, `chrome-extension://`) ou com outro endereço de host, o que barra páginas da web e truques de
+  DNS. O CSP da extensão só deixa ela se conectar a `ws://127.0.0.1`.
+- O código de pareamento nunca trafega: ao conectar, o app e a extensão provam um ao outro que têm o mesmo código
+  (desafio com números aleatórios e HMAC-SHA256). A extensão não executa nada antes de o app provar que é o
+  DronsioFlow, então outro programa que ocupe a porta (com o DronsioFlow fechado, por exemplo) não consegue o código
+  nem comandar o navegador. Quem tem o código pode controlar o navegador pelo DronsioFlow: **Gerar novo** troca o
+  código e desconecta o navegador atual.
+- Quando uma ação no navegador pede confirmação (JavaScript, enviar arquivo…), o diálogo mostra o site e a aba em que
+  ela vai rodar (`Site: https://… — título da página`). A confirmação vale só para aquela aba e aquele site: se a aba
+  fechar ou mudar de site antes de a ação rodar, a extensão recusa.
+- Um navegador por vez: se outro se conectar, o anterior pausa até você clicar em **Usar este navegador** nele.
+- Os cliques e as teclas são eventos sintéticos (o Firefox não tem a API de depuração do Chrome), e a digitação usa os
+  comandos de edição do próprio navegador. Funciona na maioria dos sites, mas um site que ignore eventos sintéticos
+  pode não reagir; aí o agente avisa que não conseguiu.
+- A extensão lê e age no quadro principal da página (não dentro de iframes) e não funciona em páginas internas do
+  navegador (`about:`, `chrome://`) nem nas lojas de extensões. JavaScript na página pede confirmação e não roda em
+  sites que bloqueiam `eval` pela política de segurança deles.
 
 ### Notas
 
@@ -342,7 +401,10 @@ app/lib/llm.js              prompts e chamadas ao Ollama (com proteção de mem�
 app/lib/textproc.js         dicionário, snippets e remoção de hesitações sem IA
 app/lib/agent.js            modo agente: roda o Claude Code (claude -p), socket de confirmação e política das ferramentas
 app/lib/bashpolicy.js       modo agente: analisa os comandos do terminal e decide quais pedem confirmação
+app/lib/browser.js          modo agente: ferramentas do navegador e o WebSocket local da extensão (pareamento por código)
 app/native/agent_hook.js    hook PreToolUse do modo agente: pergunta ao app se a ferramenta pode rodar
+app/native/browser_mcp.js   servidor MCP (stdio) das ferramentas do navegador; repassa cada chamada ao app
+app/extension/              extensão do navegador (WebExtension MV3, Firefox e Chromium)
 app/native/input_helper.py  lê teclado/mouse (evdev) e cola (wl-copy/xclip + tecla simulada via uinput)
 app/native/transcriber.py   motor Whisper local (baixa o modelo do Hugging Face na 1ª vez)
 app/ui/                     interface (páginas, modais, tema claro/escuro e a barra flutuante)
@@ -369,7 +431,9 @@ Depois de editar algo em `app/`, rode `./install.sh` de novo e reinicie o app.
 - `tools/test_agent.mjs`: testa o parser do stream-json, a detecção de `CONFIRMAR:`, a política das ferramentas
   (autonomia, Confirmar tudo, pastas de trabalho, mais de 140 comandos de terminal entre automáticos e confirmados,
   caminhos sensíveis e ferramentas desconhecidas), o hook de confirmação de ponta a ponta (com um `claude`
-  falso que chama o hook real) e o cancelamento/tempo esgotado do grupo de processos.
+  falso que chama o hook real), o cancelamento/tempo esgotado do grupo de processos, a política das ferramentas do
+  navegador, o WebSocket da extensão com um cliente falso (só 127.0.0.1, sem código, código errado, origem de página
+  e host estranho recusados) e o servidor MCP do navegador ligado à ponte do app.
 - Variáveis de ambiente: `DRONSIO_TEST_WAV=arquivo.wav` (usa o arquivo no lugar do microfone),
   `DRONSIO_TEST_NO_PASTE=1` (não cola, só registra no histórico),
   `DRONSIO_TEST_AGENT_TEXT="tarefa"` (no modo agente, usa esse texto no lugar da transcrição), `DRONSIO_USER_NAME` (nome na saudação),

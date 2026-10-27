@@ -174,7 +174,7 @@ function agentActions(h) {
   const auto = h.actions.filter((a) => a.how === "auto").length;
   const label = `${h.actions.length} ${h.actions.length === 1 ? "ação" : "ações"} (${auto} ${auto === 1 ? "automática" : "automáticas"})`;
   return `<button class="actions-toggle" data-act="toggle-actions" data-arg="${esc(h.at)}" aria-expanded="${open}">${icon("arrow", 12)}${label}</button>
-    ${open ? `<ol class="agent-actions">${h.actions.map((a) => `<li class="${a.how}"><span class="tag">${a.tool === "Bash" ? "terminal" : a.tool.startsWith("mcp__claude-in-chrome__") ? "navegador" : "arquivo"}${a.how === "confirmed" ? " · confirmada" : ""}</span><code>${esc(a.text)}</code></li>`).join("")}</ol>` : ""}`;
+    ${open ? `<ol class="agent-actions">${h.actions.map((a) => `<li class="${a.how}"><span class="tag">${a.tool === "Bash" ? "terminal" : /^mcp__(dronsio_browser|claude-in-chrome)__/.test(a.tool) ? "navegador" : "arquivo"}${a.how === "confirmed" ? " · confirmada" : ""}</span><code>${esc(a.text)}</code></li>`).join("")}</ol>` : ""}`;
 }
 
 function pageHome() {
@@ -559,6 +559,7 @@ function agentSettings() {
       <div class="item"><div><h4>Tempo máximo</h4><p>Por etapa do agente; passado o limite, ele é interrompido.</p></div>
         <div class="control"><select class="select" data-agent-select="timeoutMin">${optionList([5, 10, 20, 30, 60].map((m) => [String(m), `${m} min`]), String(a.timeoutMin))}</select></div></div>
     </div>
+    ${browserSettings()}
     <div class="group-title">Autonomia do agente</div>
     <div class="group">
       <div class="item"><div><h4>Confirmar tudo</h4><p>Desligado, o agente navega, clica, digita, roda comandos comuns e grava arquivos nas pastas de trabalho sozinho, e só pede confirmação para o que é arriscado. Ligado, toda ação que altera algo espera a sua confirmação.</p></div>
@@ -574,6 +575,26 @@ function agentSettings() {
     </div>
     <p class="muted" style="margin-bottom:8px">Enviar mensagens, publicar e comprar no navegador dependem de o agente parar e pedir confirmação, como manda a instrução dele: não é uma garantia. A lista de comandos reduz o risco, mas não cobre tudo.</p>
     <p class="muted">A instrução falada (já transcrita) e o conteúdo das páginas e arquivos que o agente abre vão para a sua conta Claude. O áudio continua só no computador.</p>`;
+}
+
+/** The DronsioFlow browser extension: whether it is connected, the pairing code and where to get it. */
+function browserSettings() {
+  const b = S.state.browser || {};
+  const status = b.error
+    ? `<p class="warn">O DronsioFlow não conseguiu esperar a extensão: ${esc(b.error)}. Troque a porta abaixo.</p>`
+    : b.connected
+      ? `<p><span class="dot ok" style="display:inline-block;vertical-align:middle;margin-right:4px"></span>Conectada: <b>${esc(b.browser || "navegador")}</b>${b.version ? ` (extensão ${esc(b.version)})` : ""}. O agente usa as abas e os logins desse navegador.</p>`
+      : `<p class="warn">Desconectada. Sem ela, o agente não age no navegador e avisa você antes de começar.</p>`;
+  return `<div class="group-title">Navegador</div>
+    <div class="group">
+      <div class="item stack"><div><h4>Extensão do DronsioFlow</h4><p>O agente controla o seu navegador (Firefox, Zen, LibreWolf, Chrome, Brave, Edge) por esta extensão, que só conversa com o DronsioFlow neste computador.</p>${status}</div>
+        <div class="control"><button class="btn secondary" data-act="open-extension-folder">Abrir pasta da extensão</button></div></div>
+      <div class="item stack"><div><h4>Código de pareamento</h4><p>Cole na extensão (ícone do DronsioFlow na barra do navegador → Conectar). Quem tem o código pode controlar o navegador pelo DronsioFlow: não compartilhe. Gerar um novo desconecta o navegador atual.</p>
+        <div class="agent-list"><div class="entry"><code>${ui.showCode ? esc(S.browserCode) : "DF1-•••••-••••••••••••••••"}</code><button class="btn ghost small" data-act="toggle-code">${ui.showCode ? "Ocultar" : "Mostrar"}</button></div></div></div>
+        <div class="control"><button class="btn secondary" data-act="copy-browser-code">Copiar</button><button class="btn ghost" data-act="browser-new-code">Gerar novo</button></div></div>
+      <div class="item"><div><h4>Porta</h4><p>Só em 127.0.0.1 (este computador). Mude se outro programa usar a mesma porta; depois, pareie de novo.</p></div>
+        <div class="control"><input class="input" style="width:100px" type="number" min="1024" max="65535" data-agent-number="browserPort" value="${esc(S.settings.agent.browserPort)}" /></div></div>
+    </div>`;
 }
 
 function renderModal() {
@@ -793,6 +814,19 @@ const ACTIONS = {
     if (r?.error) return toast(r.error);
     if (r?.dir && !S.settings.agent.workDirs.includes(r.dir)) setAgent({ workDirs: [...S.settings.agent.workDirs, r.dir] });
   },
+  "copy-browser-code": async () => {
+    await api.copy(S.browserCode);
+    toast("Código copiado");
+  },
+  "toggle-code": () => {
+    ui.showCode = !ui.showCode;
+    render();
+  },
+  "browser-new-code": async () => {
+    await api.browserNewCode();
+    toast("Novo código gerado: cole na extensão");
+  },
+  "open-extension-folder": () => api.openExtensionFolder(),
   "remove-work-dir": (i) => setAgent({ workDirs: S.settings.agent.workDirs.filter((_, j) => j !== Number(i)) }),
   "remove-pattern": (i) => setAgent({ confirmPatterns: S.settings.agent.confirmPatterns.filter((_, j) => j !== Number(i)) }),
   "refresh-ollama": () => api.refreshOllama(),
@@ -816,6 +850,7 @@ document.addEventListener("change", (ev) => {
   else if (el.dataset.agent) setAgent({ [el.dataset.agent]: el.checked });
   else if (el.dataset.agentText) setAgent({ [el.dataset.agentText]: el.value.trim() });
   else if (el.dataset.agentSelect) setAgent({ [el.dataset.agentSelect]: Number(el.value) });
+  else if (el.dataset.agentNumber) setAgent({ [el.dataset.agentNumber]: Number(el.value) });
 });
 
 const timers = {};

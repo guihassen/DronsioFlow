@@ -49,6 +49,8 @@ cp -a "$VENDOR/node_modules/electron/dist/." "$DEST/"
 mv "$DEST/electron" "$DEST/dronsioflow"
 rm -f "$DEST/resources/default_app.asar"
 cp -a "$HERE/app" "$DEST/resources/app"
+# the browser extension as a .xpi, for Zen/LibreWolf "install from file" (files at the root of the zip)
+(cd "$HERE/app/extension" && python3 -m zipfile -c "$DEST/dronsioflow-extension.xpi" manifest.json background.js page.js popup.html popup.js icons)
 
 cat > "$DEST/dronsioflow.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -84,3 +86,4 @@ if [ "$readable" = 0 ] || [ ! -w /dev/uinput ]; then
   echo "!! Falta acesso ao teclado/uinput: rode  sudo $HERE/setup-permissions.sh"
 fi
 echo "==> Pronto. Abra 'DronsioFlow' no menu de aplicativos (ou rode: dronsioflow)"
+echo "   Modo agente no navegador: instale $DEST/dronsioflow-extension.xpi (veja o README, \"Extensão do navegador\")"

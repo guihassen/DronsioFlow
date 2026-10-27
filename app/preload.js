@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld("dronsio", {
   agentConfirm: invoke("agent-confirm"),
   cancelAgent: invoke("cancel-agent"),
   pickWorkDir: invoke("pick-work-dir"),
+  browserNewCode: invoke("browser-new-code"),
+  openExtensionFolder: invoke("open-extension-folder"),
   startMeeting: invoke("start-meeting"),
   stopMeeting: invoke("stop-meeting"),
   deleteMeeting: invoke("delete-meeting"),
