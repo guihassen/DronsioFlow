@@ -3,6 +3,7 @@
 // (unclosed quotes, command substitution, variables where a path or a command goes) asks the user.
 // It reduces risk; it can't prove a command harmless (see README, "Modo agente").
 
+const fs = require("fs");
 const path = require("path");
 
 const KEYWORDS = new Set(["!", "{", "}", "then", "do", "else", "elif", "if", "while", "until", "fi", "done", "esac", "time", "coproc", "[[", "]]"]);
@@ -32,6 +33,19 @@ const WRAPPERS = {
   fakeroot: ["-l", "--lib", "--faked", "-s", "-i", "-b"], catchsegv: [], torsocks: ["-u", "-p", "-a", "-P"], proxychains: ["-f"], proxychains4: ["-f"],
   "pw-jack": [], unbuffer: [], chronic: [], ifne: [], "run-one": [], numactl: ["-C", "-N", "-m", "-p", "-i", "--physcpubind", "--cpunodebind", "--membind", "--preferred", "--interleave"],
 };
+// open a page outside the extension, where the policy can't see what happens next
+const BROWSERS = [
+  "firefox", "firefox-esr", "zen", "zen-browser", "librewolf", "waterfox", "floorp", "google-chrome", "google-chrome-stable", "chrome", "chromium",
+  "chromium-browser", "brave", "brave-browser", "microsoft-edge", "microsoft-edge-stable", "vivaldi", "opera", "epiphany", "falkon", "qutebrowser",
+  "sensible-browser", "x-www-browser", "www-browser", "gnome-www-browser",
+];
+const OPENERS = ["xdg-open", "kde-open", "kde-open5", "gnome-open", "exo-open", "gtk-launch"];
+// start an app (or the command given) outside the extension, like gio launch
+const LAUNCHERS = ["dex", "kstart", "kstart5", "kstart6"];
+// local files an opener may show without asking: they open in a viewer, not in the browser. Only these
+// extensions (and folders): a page without one (an HTML file named "page") is guessed by its content
+const VIEWER_FILE = /\.(pdf|png|jpe?g|gif|webp|bmp|tiff?|avif|heic|odt|ods|odp|docx?|xlsx?|pptx?|txt|csv|epub|mp3|ogg|oga|opus|flac|wav|m4a|mp4|mkv|webm|avi|mov)$/i;
+const BROWSER_APP = /firefox|zen|librewolf|chrom|brave|edge|vivaldi|opera|epiphany|floorp|waterfox|browser/i;
 const TERMINALS = ["gnome-terminal", "kgx", "ptyxis", "konsole", "xterm", "uxterm", "alacritty", "kitty", "foot", "footclient", "wezterm", "tilix", "terminator", "xfce4-terminal", "x-terminal-emulator", "lxterminal", "mate-terminal", "sakura", "st", "urxvt", "rxvt", "terminology", "cool-retro-term"];
 const EDITORS = ["vim", "vi", "nvim", "view", "ex", "gvim", "vimdiff", "emacs", "emacsclient", "nano", "micro", "kak", "helix", "hx"];
 // take their arguments as data, never as a command: the generic checks for unknown programs skip them
@@ -60,6 +74,7 @@ const RULES = [
   { title: "Apagar", items: [...DELETE.filter((n) => !n.startsWith("trash") && n !== "kde-rm"), "lixeira (gio trash/remove, trash-put, trash-empty, kioclient)", "find -delete / -exec rm", "git clean", "git reset --hard", "git checkout -- / git restore", "git branch -D", "git stash drop/clear", "git rm", "rsync --delete", "tar --remove-files, zip -m", "mv de fora das pastas de trabalho"] },
   { title: "Sistema", items: ["sudo, su, pkexec, doas, runuser", "instalar ou remover pacotes (dnf, apt, rpm, flatpak, snap, pip, npm -g, cargo…)", "systemctl, service", "kill, pkill, killall", "reboot, shutdown", "dd, mkfs, fdisk, parted, mount", "chmod/setfacl fora das pastas, chmod -R, chown", "crontab", "dconf, gsettings set, xdg-settings set", "nmcli connection modify/delete/down, radio, rfkill", "loginctl, hostnamectl, timedatectl, update-alternatives", "dbus-send, gdbus call/emit, busctl call/set-property", "unshare, nsenter, chroot", "git apply/merge/pull/rebase/checkout… fora das pastas", "cp/mv/tee/sed -i/sort -o/convert gravando fora das pastas de trabalho"] },
   { title: "Publicar ou enviar", items: ["git push", "gh (exceto consultas)", "ssh, scp, sftp", "rsync para outro computador", "curl enviando dados (-d, -F, -T, -X POST…)", "wget --post", "nc, ncat, socat", "mail, sendmail", "servidores (python -m http.server, php -S, http-server, serve, busybox httpd, ruby -run)"] },
+  { title: "Navegador fora da extensão", items: ["abrir o navegador (firefox, zen, chrome, brave…)", "xdg-open, gio open, kde-open com qualquer coisa que não seja uma pasta ou um arquivo de documento, imagem, áudio ou vídeo (PDF, PNG, ODT, TXT, MP4…)", "gtk-launch, gio launch, gapplication launch/action, dex, kstart, kioclient exec", "flatpak run de um navegador"] },
   { title: "Segredos", items: ["secret-tool, keyctl, kwallet-query", "git credential", "gpg --export-secret-keys", "pass, gopass, keepassxc-cli, bw, op, lpass", "nmcli --show-secrets, nmcli device wifi show-password", "printenv, env, set, export -p, declare -p (mostram tokens do ambiente)"] },
   { title: "Brechas", items: ["código inline (bash -c, python -c, node -e…)", "pipe ou entrada para um interpretador", "$(…) e crases", "rodar um arquivo criado ou alterado nesta tarefa", "programas que rodam outro comando (xargs, tmux, terminais, strace, gdb, docker exec, vim -c, busybox…) com um comando da lista", "eval, alias, function, source de fora das pastas", "npx e parecidos", "caminhos sensíveis (~/.ssh, .env, ~/.config…), também por curinga ou variável", "> ou >> para fora das pastas de trabalho", "variáveis como PATH e LD_PRELOAD"] },
 ];
@@ -394,6 +409,25 @@ function matchesPattern(argv, pattern) {
   });
 }
 
+/**
+ * True when an opener (xdg-open, gio open…) would show `w` in the browser or start an app: anything
+ * but an existing folder or a file with a viewer extension (VIEWER_FILE: a PDF, an image…).
+ * Addresses (file: included), names it can't resolve and files made in this task count as pages.
+ */
+function opensPage(w, ctx, chk) {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(w.text)) return true;
+  const p = chk.resolve(w);
+  if (!p || ctx.isSessionFile(p) || ctx.written.has(p)) return true;
+  try {
+    const real = fs.realpathSync(p);
+    const st = fs.statSync(real);
+    if (st.isDirectory()) return false;
+    return !(st.isFile() && VIEWER_FILE.test(p) && VIEWER_FILE.test(real));
+  } catch {
+    return true; // missing: a name like exemplo.dev or firefox
+  }
+}
+
 /** Reason to confirm one simple command, or null. `cmd.words` already has keywords stripped. */
 function checkCommand(cmd, ctx, chk, depth = 0) {
   if (depth > 8) return confirm("comando aninhado demais");
@@ -427,6 +461,9 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
   if (BUILTINS.includes(name)) return confirm(`roda ou define código (${name})`);
   if (SECRETS.includes(name) || name.startsWith("git-credential")) return confirm(`lê ou entrega senhas e chaves guardadas (${name})`);
   if (DIRECT_RUNNERS.includes(name)) return confirm(`roda outro programa por baixo (${name})`);
+  if (BROWSERS.includes(name)) return confirm(`abre o navegador pelo terminal, fora da extensão do DronsioFlow (${name})`);
+  if (LAUNCHERS.includes(name)) return confirm(`abre um aplicativo pelo terminal (${name})`);
+  if (OPENERS.includes(name) && args.some((w) => !isOption(w) && opensPage(w, ctx, chk))) return confirm(`abre uma página ou um aplicativo pelo terminal, fora da extensão do DronsioFlow (${name})`);
   if (name in WRAPPERS) {
     let k = 0;
     while (k < args.length && isOption(args[k])) k += WRAPPERS[name].includes(args[k].text) ? 2 : 1;
@@ -526,11 +563,15 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
       }
       return null;
     }
+    case "gapplication":
+      return ["launch", "action"].includes(args[0]?.text) ? confirm(`abre um aplicativo pelo terminal (gapplication ${args[0].text})`) : null;
     case "gio": {
       const verb = args[0]?.text;
       const rest = args.slice(1);
       if (["remove", "rm", "trash"].includes(verb)) return confirm(`apaga arquivos (gio ${verb})`);
       if (verb === "mount") return confirm("gio mount monta ou desmonta");
+      if (verb === "open" && rest.some((w) => !isOption(w) && opensPage(w, ctx, chk))) return confirm("abre uma página ou um aplicativo pelo terminal, fora da extensão do DronsioFlow (gio open)");
+      if (verb === "launch") return confirm("abre um aplicativo pelo terminal (gio launch)");
       if (["copy", "cp"].includes(verb)) return sub([{ ...head, text: "cp" }, ...rest]);
       if (["move", "mv"].includes(verb)) return sub([{ ...head, text: "mv" }, ...rest]);
       if (verb === "rename") {
@@ -550,6 +591,7 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
       const verb = ops[0]?.text;
       if (["remove", "rm", "del", "move", "mv"].includes(verb)) return confirm(`apaga ou move arquivos (${name} ${verb})`);
       if (["copy", "cp"].includes(verb)) return ops.length > 2 ? chk.writeTarget(ops.at(-1), "cópia") : null;
+      if (["exec", "openProperties"].includes(verb) && ops.slice(1).some((w) => opensPage(w, ctx, chk))) return confirm(`abre uma página ou um aplicativo pelo terminal, fora da extensão do DronsioFlow (${name} ${verb})`);
       return null;
     }
     case "gpg": case "gpg2":
@@ -855,6 +897,7 @@ function checkCommand(cmd, ctx, chk, depth = 0) {
         conda: ["install", "remove", "uninstall", "update", "create"], mamba: ["install", "remove", "uninstall", "update", "create"],
         flatpak: ["install", "uninstall", "remove", "update", "upgrade", "repair", "override", "remote-add"], snap: ["install", "remove", "refresh", "revert"],
       }[name];
+      if (name === "flatpak" && ops[0] === "run" && BROWSER_APP.test(ops[1] || "")) return confirm(`abre o navegador pelo terminal, fora da extensão do DronsioFlow (${ops[1]})`);
       if (name === "uv") return (ops[0] === "pip" && ["install", "uninstall"].includes(ops[1])) || (ops[0] === "tool" && ["install", "uninstall", "run"].includes(ops[1])) ? confirm("uv instala ou executa pacotes") : null;
       return risky.includes(ops[0]) ? confirm(`${name} ${ops[0]} instala ou remove pacotes`) : null;
     }

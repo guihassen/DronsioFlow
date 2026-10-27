@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "DronsioFlow",
+  "version": "1.0.0",
+  "description": "Deixa o modo agente do DronsioFlow usar este navegador. Conecta só ao DronsioFlow no próprio computador.",
+  "icons": { "32": "icons/icon-32.png", "48": "icons/icon-48.png", "96": "icons/icon-96.png", "128": "icons/icon-128.png" },
+  "permissions": ["tabs", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* data:" },
+  "background": { "service_worker": "background.js", "scripts": ["background.js"] },
+  "action": { "default_title": "DronsioFlow", "default_popup": "popup.html", "default_icon": { "32": "icons/icon-32.png", "48": "icons/icon-48.png" } },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "extensao@dronsioflow.local",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  },
+  "minimum_chrome_version": "116"
+}

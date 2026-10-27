@@ -4,10 +4,15 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, networkInterfaces, tmpdir } from "node:os";
+import net from "node:net";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
-const agent = createRequire(import.meta.url)("../app/lib/agent.js");
+const require = createRequire(import.meta.url);
+const agent = require("../app/lib/agent.js");
+const browser = require("../app/lib/browser.js");
+const B = "mcp__dronsio_browser__";
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
@@ -33,7 +38,8 @@ test("args: instruction after --, resume continues the session", () => {
   const a = agent.buildArgs({ prompt: "--help; rm -rf ~" });
   assert.equal(a[0], "-p");
   assert.deepEqual(a.slice(-2), ["--", "--help; rm -rf ~"]);
-  for (const f of ["--chrome", "--verbose", "--append-system-prompt", "--permission-mode", "--allowedTools"]) assert(a.includes(f), f);
+  assert(!a.includes("--chrome") && a.includes("--no-chrome") && a.includes("--strict-mcp-config"));
+  for (const f of ["--verbose", "--append-system-prompt", "--permission-mode", "--allowedTools"]) assert(a.includes(f), f);
   assert.equal(a[a.indexOf("--output-format") + 1], "stream-json");
   assert(!a.some((x) => x.includes("dangerously")));
   const r = agent.buildArgs({ prompt: "ignored", sessionId: "abc" });
@@ -46,11 +52,11 @@ test("args: only read-only tools pre-approved, user settings ignored, hook insta
   assert.equal(a[a.indexOf("--permission-mode") + 1], "default");
   assert.equal(a[a.indexOf("--setting-sources") + 1], "");
   const allowed = a[a.indexOf("--allowedTools") + 1].split(",");
-  for (const t of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "mcp__claude-in-chrome", "mcp__claude-in-chrome__computer", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool"])
+  for (const t of ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "mcp__dronsio_browser", ...["click", "type", "key", "scroll", "form_input", "tab_close", "file_upload", "javascript"].map((x) => B + x)])
     assert(!allowed.includes(t), t);
-  for (const t of ["Read", "Grep", "mcp__claude-in-chrome__read_page", "mcp__claude-in-chrome__navigate"]) assert(allowed.includes(t), t);
+  for (const t of ["Read", "Grep", B + "read_page", B + "navigate", B + "tabs_list", B + "screenshot"]) assert(allowed.includes(t), t);
   const disallowed = a[a.indexOf("--disallowedTools") + 1].split(",");
-  for (const t of ["SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_*", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.claude.json)", "Read(**/.env*)", "Read(**/id_rsa*)",
+  for (const t of ["SendMessage", "ListAgents", "RemoteTrigger", "PushNotification", "CronCreate", "CronDelete", "CronList", "ScheduleWakeup", "EnterWorktree", "ExitWorktree", "DesignSync", "Monitor", "Skill", "mcp__claude_ai_*", "mcp__claude-in-chrome__*", "Read(~/.ssh/**)", "Read(~/.config/**)", "Read(~/.claude.json)", "Read(**/.env*)", "Read(**/id_rsa*)",
     "Read(~/.var/**)", "Read(~/.aws/**)", "Read(~/.git-credentials)", "Read(~/.netrc)", "Read(~/.local/share/**)", "Read(~/.kube/**)", "Read(~/.docker/**)", "Read(~/.password-store/**)",
     "Read(~/.bash_history)", "Read(~/.zsh_history)", "Read(~/.pgpass)", "Read(~/.npmrc)"])
     assert(disallowed.includes(t), t);
@@ -67,11 +73,11 @@ test("policy, Confirmar tudo: reading passes, changing anything needs the user (
   assert.equal(P("Read", { file_path: "/tmp/notes.txt" }), "allow");
   for (const t of ["Task", "Agent", "ToolSearch", "TodoWrite", "TaskStop", "WebSearch"]) assert.equal(P(t, {}), "allow", t);
   for (const t of ["WebFetch", "SendMessage", "RemoteTrigger", "ReportFindings", "mcp__claude_ai_Claude_Docs__create", "SomethingNew"]) assert.equal(P(t, {}), "confirm", t);
-  assert.equal(P("mcp__claude-in-chrome__get_page_text", {}), "allow");
-  assert.equal(P("mcp__claude-in-chrome__computer", { action: "screenshot" }), "allow");
-  for (const action of ["left_click", "type", "key", "scroll", "anything_new"]) assert.equal(P("mcp__claude-in-chrome__computer", { action }), "confirm", action);
-  for (const t of ["Bash", "Write", "Edit", "NotebookEdit", "mcp__claude-in-chrome__form_input", "mcp__claude-in-chrome__javascript_tool", "mcp__claude-in-chrome__browser_batch", "mcp__claude-in-chrome__future_tool"])
-    assert.equal(P(t, {}), "confirm", t);
+  for (const t of ["tabs_list", "tab_select", "read_page", "get_page_text", "find", "screenshot"]) assert.equal(P(B + t, { tabId: 1 }), "allow", t);
+  assert.equal(P(B + "navigate", { url: "https://example.com" }), "allow");
+  assert.equal(P(B + "tab_create", {}), "allow");
+  for (const t of ["click", "type", "key", "scroll", "form_input", "tab_close", "file_upload", "javascript", "future_tool"]) assert.equal(P(B + t, { ref: "ref_1", text: "Oi" }), "confirm", t);
+  for (const t of ["Bash", "Write", "Edit", "NotebookEdit", "mcp__claude-in-chrome__get_page_text", "mcp__claude-in-chrome__computer"]) assert.equal(P(t, {}), "confirm", t);
   assert.equal(P("Bash", { command: "ls" }), "confirm");
   assert.equal(P("Write", { file_path: "/tmp/a.txt", content: "x" }), "confirm");
   assert.equal(P("Read", { file_path: "~/.ssh/id_rsa" }), "deny");
@@ -79,15 +85,36 @@ test("policy, Confirmar tudo: reading passes, changing anything needs the user (
 
 test("policy: autonomy in the browser, except JavaScript and files leaving the computer", () => {
   const P = agent.toolPolicy;
-  for (const action of ["left_click", "type", "key", "scroll", "left_click_drag", "anything_new"]) assert.equal(P("mcp__claude-in-chrome__computer", { action, text: "Oi" }), "allow", action);
-  for (const t of ["form_input", "shortcuts_execute", "tabs_close_mcp", "gif_creator", "upload_image", "future_tool"]) assert.equal(P(`mcp__claude-in-chrome__${t}`, { ref: "x" }), "allow", t);
-  assert.equal(P("mcp__claude-in-chrome__javascript_tool", { action: "javascript_exec", text: "1" }), "confirm");
-  assert.equal(P("mcp__claude-in-chrome__browser_batch", { actions: [{ tool: "javascript_tool", text: "x" }] }), "confirm");
-  assert.equal(P("mcp__claude-in-chrome__browser_batch", { actions: [{ tool: "computer", action: "left_click" }] }), "allow");
-  assert.equal(P("mcp__claude-in-chrome__file_upload", { paths: ["/tmp/foto.png"], ref: "r1" }), "allow");
-  assert.equal(P("mcp__claude-in-chrome__file_upload", { paths: ["~/Imagens/foto.png"] }), "confirm", "outside the work folders");
-  assert.equal(P("mcp__claude-in-chrome__file_upload", { paths: ["~/.ssh/id_ed25519"] }), "deny");
-  assert.equal(P("mcp__claude-in-chrome__browser_batch", { actions: [{ tool: "file_upload", paths: ["~/.aws/credentials"] }] }), "confirm");
+  for (const t of ["click", "type", "key", "scroll", "form_input", "tab_close"]) assert.equal(P(B + t, { ref: "ref_1", text: "Oi", keys: "Enter", tabId: 3 }), "allow", t);
+  for (const t of ["tabs_list", "tab_create", "tab_select", "read_page", "get_page_text", "find", "screenshot"]) assert.equal(P(B + t, {}), "allow", t);
+  assert.equal(P(B + "navigate", { url: "https://web.whatsapp.com/" }), "allow");
+  assert.equal(P(B + "navigate", { url: "back" }), "allow");
+  // only web pages: javascript:/file:/data: addresses would run code or read files without the dialog
+  for (const url of ["javascript:alert(1)", "file:///home/x/.ssh/id_rsa", "data:text/html,<script>1</script>", "about:config", "chrome://settings", "nada"]) {
+    assert.equal(P(B + "navigate", { url }), "confirm", url);
+    assert.equal(P(B + "tab_create", { url }), "confirm", url);
+  }
+  assert.equal(P(B + "javascript", { code: "1" }), "confirm");
+  assert.equal(P(B + "file_upload", { paths: ["/tmp/foto.png"], ref: "r1" }), "allow");
+  assert.equal(P(B + "file_upload", { paths: ["~/Imagens/foto.png"], ref: "r1" }), "confirm", "outside the work folders");
+  assert.equal(P(B + "file_upload", { paths: ["~/.ssh/id_ed25519"], ref: "r1" }), "deny");
+  assert.equal(P(B + "file_upload", { paths: ["~/.aws/credentials"], ref: "r1" }), "confirm");
+  assert.equal(P(B + "file_upload", { paths: ["foto.png"], ref: "r1" }), "confirm", "relative: can't be checked");
+  assert.equal(P(B + "file_upload", { paths: "/tmp/foto.png", ref: "r1" }), "confirm", "not a list");
+  assert.equal(P(B + "file_upload", { ref: "r1" }), "confirm", "no paths");
+  assert.equal(P(B + "made_up_tool", {}), "confirm", "not one of the extension's tools");
+  // Claude in Chrome is gone: its tools are unknown now, so they ask
+  assert.equal(P("mcp__claude-in-chrome__computer", { action: "left_click" }), "confirm");
+});
+
+test("browser tools: every tool the MCP server lists is known to the policy, read-only ones only look", () => {
+  assert.deepEqual(browser.TOOL_NAMES.slice().sort(), ["click", "file_upload", "find", "form_input", "get_page_text", "javascript", "key", "navigate", "read_page", "screenshot", "scroll", "tab_close", "tab_create", "tab_select", "tabs_list", "type"]);
+  assert.deepEqual(browser.READ_ONLY.slice().sort(), ["find", "get_page_text", "navigate", "read_page", "screenshot", "tab_create", "tab_select", "tabs_list"]);
+  for (const t of browser.TOOLS) assert.equal(t.inputSchema.type, "object", t.name);
+  // the key ties a call the hook allowed to the one that reaches the browser, whatever the key order
+  assert.equal(browser.callKey(B + "type", { text: "Oi", ref: "ref_1" }), browser.callKey(B + "type", { ref: "ref_1", text: "Oi" }));
+  assert.notEqual(browser.callKey(B + "type", { text: "Oi" }), browser.callKey(B + "type", { text: "Oi!" }));
+  assert.notEqual(browser.callKey(B + "type", { text: "Oi" }), browser.callKey(B + "key", { text: "Oi" }));
 });
 
 test("policy: Write/Edit inside the work folders pass; dotfiles ask; sensitive files are refused", () => {
@@ -127,6 +154,13 @@ const scratch = mkdtempSync(join(tmpdir(), "dronsio-bash-"));
 const oldScript = join(scratch, "antigo.sh");
 writeFileSync(oldScript, "echo oi\n");
 utimesSync(oldScript, 1000, 1000);
+// an old PDF and folder: openers show them without asking (a missing or new file asks)
+const oldPdf = join(scratch, "antigo.pdf");
+writeFileSync(oldPdf, "%PDF\n");
+utimesSync(oldPdf, 1000, 1000);
+const oldDir = join(scratch, "antiga");
+mkdirSync(oldDir);
+utimesSync(oldDir, 1000, 1000);
 const newScript = join(scratch, "novo.sh");
 writeFileSync(newScript, "echo oi\n");
 const SINCE = Date.now() - 60000; // the task started a minute ago
@@ -139,7 +173,7 @@ const BASH_CASES = [
   ["npm run build", "allow"], ["npm install", "allow"], ["grep rm arquivo.txt", "allow"], ["echo 'rm -rf /'", "allow"], ['echo "rm" | wc -c', "allow"],
   ["cat /tmp/notas.txt", "allow"], ["cat ~/Documentos/lista.md | head -5", "allow"], ["mkdir -p /tmp/proj/src", "allow"], ["mkdir ~/Documentos/novo", "allow"],
   ["cp /tmp/a.txt /tmp/b.txt", "allow"], ["mv ~/Downloads/foto.jpg ~/Documentos/fotos/", "allow"], ["cp ~/Imagens/x.png /tmp/", "allow"],
-  ["xdg-open https://example.com", "allow"], ["curl -fsSL https://example.com", "allow"], ["curl -s -o /tmp/page.html https://example.com", "allow"],
+  ["xdg-open https://example.com", "confirm"], [`xdg-open ${oldPdf}`, "allow"], ["xdg-open /tmp/nao-existe.pdf", "confirm"], ["curl -fsSL https://example.com", "allow"], ["curl -s -o /tmp/page.html https://example.com", "allow"],
   ["wget -q -O /tmp/x.zip https://example.com/x.zip", "allow"], ["echo ok > /tmp/out.txt", "allow"], ["date >> ~/Documentos/log.txt", "allow"],
   ["find /tmp -name '*.log'", "allow"], ["find . -name '*.js' -exec grep -l TODO {} \\;", "allow"], ["python3 --version", "allow"],
   [`bash ${oldScript}`, "allow"], ["cd /tmp && cp a.txt b.txt", "allow"], ["ls 2>/dev/null; echo done", "allow"], ["sort /tmp/x | uniq -c > /tmp/y", "allow"],
@@ -217,7 +251,7 @@ const CLASS_CASES = {
       "nmcli --show-secrets connection show wifi", "nmcli -s c show casa", "nmcli connection show casa --show-secrets", "keyctl print 123", "kwallet-query -r x kdewallet",
       "nmcli device wifi show-password", "nmcli dev wifi show-password ifname wlan0", "nmcli d w s", "nmcli -t device wifi show-p", "/usr/bin/nmcli dev wifi show-password",
     ],
-    allow: ["gio open /tmp/x.pdf", "gio info /tmp/x", "gio copy /tmp/a /tmp/b", "gio list ~/Documentos", "ssh-add -l", "ssh-add -L", "gpg --list-keys", "gpg --export -a ABC",
+    allow: [`gio open ${oldPdf}`, "gio info /tmp/x", "gio copy /tmp/a /tmp/b", "gio list ~/Documentos", "ssh-add -l", "ssh-add -L", "gpg --list-keys", "gpg --export -a ABC",
       "nmcli device status", "nmcli connection show", "nmcli device wifi list", "nmcli dev wifi rescan"],
   },
   "B3 arquivadores e programas que gravam": {
@@ -288,7 +322,7 @@ const CLASS_CASES = {
   "falsos positivos de antes": {
     confirm: [],
     allow: ["ls", "git status", "git log --oneline", "git diff", "git add -A", "git commit -m 'x'", "npm test", "grep rm arquivo.txt", "echo 'rm'", "mkdir -p /tmp/a",
-      "cp /tmp/a /tmp/b", "mv /tmp/a /tmp/b", "xdg-open https://example.com", "gio open /tmp/x", "tmux ls", "docker ps", "nmcli device status", "env VAR=1 npm test",
+      "cp /tmp/a /tmp/b", "mv /tmp/a /tmp/b", `xdg-open ${oldPdf}`, `gio open ${oldDir}`, "tmux ls", "docker ps", "nmcli device status", "env VAR=1 npm test",
       "sort /tmp/arquivo"],
   },
 };
@@ -345,9 +379,11 @@ test("session files: written paths are tracked, so running them later asks", () 
 test("history lines: actions that changed something, not reading", () => {
   assert.deepEqual(agent.describeAction("Bash", { command: "ls -la" }), { tool: "Bash", text: "ls -la" });
   assert.equal(agent.describeAction("Write", { file_path: "/tmp/a.txt", content: "x" }).text, "Gravou /tmp/a.txt");
-  assert.equal(agent.describeAction("mcp__claude-in-chrome__navigate", { url: "https://example.com" }).text, "Abriu https://example.com");
-  assert.equal(agent.describeAction("mcp__claude-in-chrome__computer", { action: "type", text: "Oi Amanda" }).text, "Digitar no Chrome: action: type · text: Oi Amanda");
-  for (const [n, i] of [["Read", { file_path: "/tmp/a" }], ["Grep", {}], ["mcp__claude-in-chrome__get_page_text", {}], ["mcp__claude-in-chrome__computer", { action: "screenshot" }], ["TodoWrite", {}]])
+  assert.equal(agent.describeAction(B + "navigate", { url: "https://example.com" }).text, "Abriu https://example.com");
+  assert.equal(agent.describeAction(B + "tab_create", { url: "https://example.com" }).text, "Abriu https://example.com");
+  assert.equal(agent.describeAction(B + "type", { text: "Oi Amanda", ref: "ref_3" }).text, "Digitar no navegador: Oi Amanda · em ref_3");
+  assert.equal(agent.describeAction(B + "click", { ref: "ref_9" }).text, "Clicar no navegador: ref: ref_9");
+  for (const [n, i] of [["Read", { file_path: "/tmp/a" }], ["Grep", {}], [B + "get_page_text", {}], [B + "screenshot", {}], [B + "tab_create", {}], [B + "tabs_list", {}], ["TodoWrite", {}]])
     assert.equal(agent.describeAction(n, i), null, n);
 });
 
@@ -362,6 +398,48 @@ test("system prompt: work folders, one CONFIRMAR before sending, only the user's
   assert(a[a.indexOf("--append-system-prompt") + 1].includes("/srv/x"));
 });
 
+test("system prompt: browser only through the extension, warns before starting when it is not connected", () => {
+  const off = agent.systemPrompt({ browser: { connected: false } });
+  assert(off.includes("NÃO está conectada") && off.includes(browser.NOT_CONNECTED) && /não comece nada, nem pelo terminal/.test(off));
+  assert(off.includes("Nunca abra páginas nem o navegador pelo terminal (xdg-open"));
+  assert(!/Chrome/.test(off));
+  const on = agent.systemPrompt({ browser: { connected: true, browser: "Zen 1" } });
+  assert(on.includes("conectada ao Zen 1") && !on.includes(browser.NOT_CONNECTED) && on.includes("tab_create"));
+  assert(agent.systemPrompt().includes("NÃO está conectada"), "unknown status counts as not connected");
+  const a = agent.buildArgs({ prompt: "x", browser: { connected: true, browser: "Firefox 158" }, browserSocket: "/tmp/d it's/browser.sock" });
+  assert(a[a.indexOf("--append-system-prompt") + 1].includes("Firefox 158"));
+  const mcp = JSON.parse(a[a.indexOf("--mcp-config") + 1]).mcpServers;
+  assert.deepEqual(Object.keys(mcp), ["dronsio_browser"]);
+  assert(mcp.dronsio_browser.args[0].endsWith("app/native/browser_mcp.js") && mcp.dronsio_browser.args[1] === "/tmp/d it's/browser.sock");
+  assert.equal(mcp.dronsio_browser.env.ELECTRON_RUN_AS_NODE, "1");
+  assert(a.indexOf("--mcp-config") < a.indexOf("--"), "before the instruction");
+  assert(!agent.buildArgs({ prompt: "x" }).includes("--mcp-config"), "no bridge, no browser server");
+});
+
+test("Bash: opening a page or the browser from the terminal asks (it escapes the extension)", () => {
+  for (const c of ["xdg-open https://web.whatsapp.com", "xdg-open web.whatsapp.com", "gio open https://x.com", "firefox https://a.com", "flatpak run app.zen_browser.zen", "google-chrome", "sensible-browser http://a"])
+    assert.equal(agent.bashDecision(c, {}).decision, "confirm", c);
+  // review of TASK-4: other openers, addresses outside the known TLDs, local pages and file: also ask
+  const opened = join(scratch, "abrir");
+  mkdirSync(opened, { recursive: true });
+  for (const f of ["relatorio.pdf", "foto.png", "p.html", "fake.pdf"]) writeFileSync(join(opened, f), "x");
+  for (const f of ["relatorio.pdf", "foto.png", "p.html", ""]) utimesSync(join(opened, f), new Date(SINCE - 3600e3), new Date(SINCE - 3600e3));
+  const o = { since: SINCE };
+  for (const c of ["xdg-open exemplo.dev", `xdg-open ${opened}/p.html`, `xdg-open file://${opened}/relatorio.pdf`, "gtk-launch firefox", "gio launch /usr/share/applications/firefox.desktop", "kioclient exec https://x", "kioclient5 exec https://x", `gio open ${opened}/p.html`, `xdg-open ${opened}/nao-existe.pdf`, `xdg-open ${opened}/fake.pdf`, "xdg-open $X"])
+    assert.equal(agent.bashDecision(c, o).decision, "confirm", c);
+  for (const c of [`xdg-open ${opened}/relatorio.pdf`, `xdg-open ${opened}/foto.png`, `xdg-open ${opened}`, `gio open ${opened}/relatorio.pdf`, `kioclient copy ${opened}/foto.png ${scratch}/copia.png`, "flatpak run org.gnome.Calculator", "flatpak list"])
+    assert.equal(agent.bashDecision(c, { ...o, workDirs: [scratch] }).decision, "allow", c);
+  // round 2: a page without an extension (GNOME guesses it by content and opens the browser), app launchers
+  writeFileSync(join(opened, "page"), "<html><script>alert(1)</script></html>");
+  writeFileSync(join(opened, "notas.md"), "x");
+  symlinkSync(join(opened, "page"), join(opened, "link.pdf"));
+  for (const f of ["page", "notas.md", ""]) utimesSync(join(opened, f), new Date(SINCE - 3600e3), new Date(SINCE - 3600e3));
+  for (const c of [`xdg-open ${opened}/page`, `gio open ${opened}/page`, `kde-open ${opened}/notas.md`, `xdg-open ${opened}/link.pdf`, "gapplication launch org.mozilla.firefox", "gapplication action org.gnome.Nautilus new-window", "dex /usr/share/applications/firefox.desktop", "dex -a", "kstart firefox", "kstart5 --window x firefox", "kstart6 -- xterm"])
+    assert.equal(agent.bashDecision(c, { ...o, workDirs: [scratch] }).decision, "confirm", c);
+  for (const c of [`xdg-open ${opened}/relatorio.pdf`, `gio open ${opened}`, "gapplication list-apps", "gapplication help"])
+    assert.equal(agent.bashDecision(c, { ...o, workDirs: [scratch] }).decision, "allow", c);
+});
+
 test("dialog shows the real call, not the model's description", () => {
   const bash = agent.describeToolCall("Bash", { command: "rm -rf ~/x", description: "limpar arquivos temporários" });
   assert.equal(bash.detail, "rm -rf ~/x");
@@ -370,11 +448,14 @@ test("dialog shows the real call, not the model's description", () => {
   assert(write.detail.startsWith("/tmp/a.txt\n\nokok") && write.detail.includes("mais 2500 caracteres"));
   const edit = agent.describeToolCall("Edit", { file_path: "/tmp/b", old_string: "a", new_string: "b" });
   assert(edit.detail.includes("/tmp/b") && edit.detail.includes("Trocar:\na") && edit.detail.includes("Por:\nb"));
-  const click = agent.describeToolCall("mcp__claude-in-chrome__computer", { action: "left_click", coordinate: [10, 20], tabId: 3 });
-  assert.equal(click.title, "Clicar no Chrome");
-  assert.equal(click.detail, "action: left_click\ncoordinate: [10,20]");
-  assert(agent.describeToolCall("mcp__claude-in-chrome__computer", { action: "type", text: "Oi Amanda" }).detail.includes("Oi Amanda"));
-  assert.equal(agent.describeToolCall("mcp__claude-in-chrome__javascript_tool", { action: "javascript_exec", text: "document.forms[0].submit()" }).detail, "document.forms[0].submit()");
+  const click = agent.describeToolCall(B + "click", { coordinate: [10, 20], tabId: 3 });
+  assert.equal(click.title, "Clicar no navegador");
+  assert.equal(click.detail, "coordinate: [10,20]");
+  assert.equal(agent.describeToolCall(B + "click", { ref: "ref_1", button: "double" }).title, "Dar duplo clique no navegador");
+  assert(agent.describeToolCall(B + "type", { text: "Oi Amanda" }).detail.includes("Oi Amanda"));
+  assert.equal(agent.describeToolCall(B + "javascript", { code: "document.forms[0].submit()" }).detail, "document.forms[0].submit()");
+  assert.equal(agent.describeToolCall(B + "javascript", { code: "x" }).title, "Rodar JavaScript na página do navegador");
+  assert.equal(agent.describeToolCall(B + "file_upload", { paths: ["/tmp/a.png"], ref: "ref_2" }).title, "Enviar arquivos pelo navegador");
 });
 
 const dir = mkdtempSync(join(tmpdir(), "dronsio-agent-test-"));
@@ -583,6 +664,40 @@ test("hook: fails closed without the app, with a bad answer or bad input", async
   }
 });
 
+test("hook: a denial with a reason reaches the agent (browser tab it couldn't confirm)", async () => {
+  const hookCmd = JSON.parse(agent.buildArgs({ prompt: "x", hookSocket: "SOCK" }).find((a) => a.startsWith('{"hooks"'))).hooks.PreToolUse[0].hooks[0].command;
+  const reasonFor = (socket) =>
+    new Promise((resolve) => {
+      const p = spawn("sh", ["-c", hookCmd.replace("SOCK", socket)]);
+      let out = "";
+      p.stdout.on("data", (d) => (out += d));
+      p.on("close", () => resolve(JSON.parse(out).hookSpecificOutput));
+      p.stdin.end(JSON.stringify({ tool_name: `${B}click`, tool_input: { tabId: 9, ref: "e1" } }));
+    });
+  const server = await agent.permissionServer(async () => ({ reason: "O DronsioFlow recusou esta ação no navegador: não conseguiu confirmar em qual aba ela roda." }));
+  try {
+    const out = await reasonFor(server.socketPath);
+    assert.equal(out.permissionDecision, "deny");
+    assert.match(out.permissionDecisionReason, /^O DronsioFlow recusou .* em qual aba ela roda\. Não tente/);
+  } finally {
+    server.close();
+  }
+  const plain = await agent.permissionServer(async () => false);
+  try {
+    assert.match((await reasonFor(plain.socketPath)).permissionDecisionReason, /^O usuário não autorizou/);
+  } finally {
+    plain.close();
+  }
+  // main.js: a failed tab_info notifies the user and denies with that reason (Electron code, checked by source)
+  const main = readFileSync(new URL("../app/main.js", import.meta.url), "utf8");
+  const block = main.slice(main.indexOf('browserLink.call("tab_info"'), main.indexOf("action.detail = `${agent.describeSite(site)}"));
+  assert.match(block, /logStep\(`agent \$\{call\.tool_name\} refused: tab unknown/);
+  assert.match(block, /if \(!job\.tabWarned\) notify\("Ação no navegador recusada", "Não consegui confirmar em qual aba ela roda/); // once per task
+  assert.match(block, /job\.tabWarned = true;/);
+  assert.match(main, /browserApproved: browser\.approvals\(\), tabWarned: false \}/);
+  assert.match(block, /return \{ reason: `O DronsioFlow recusou/);
+});
+
 test("cancel as claude delivers its answer: rejected as cancelled, no answer to keep", async () => {
   let t;
   t = agent.run({ bin: fake, prompt: "x", timeoutMs: 5000, onEvent: (e) => e.type === "result" && t.cancel() });
@@ -624,6 +739,418 @@ test("hold pauses the timeout while the user decides", async () => {
   const started = Date.now();
   await assert.rejects(t.promise, /tempo esgotado/);
   assert(Date.now() - started >= 150, "the time spent on hold did not count");
+});
+
+// --- browser extension link (lib/browser.js) and MCP server (native/browser_mcp.js), with a fake extension ---
+
+/** Raw WebSocket upgrade, so the test can send any Origin/Host/protocol a real browser would not. */
+function wsOpen(port, { origin = "moz-extension://0123abcd-0000-4000-8000-000000000000", host = `127.0.0.1:${port}`, protocols, address = "127.0.0.1" } = {}) {
+  return new Promise((resolve, reject) => {
+    const sock = net.connect(port, address);
+    let buf = Buffer.alloc(0);
+    const headers = ["GET / HTTP/1.1", `Host: ${host}`, "Upgrade: websocket", "Connection: Upgrade", `Sec-WebSocket-Key: ${randomBytes(16).toString("base64")}`, "Sec-WebSocket-Version: 13"];
+    if (origin) headers.push(`Origin: ${origin}`);
+    if (protocols) headers.push(`Sec-WebSocket-Protocol: ${protocols}`);
+    sock.on("error", reject);
+    sock.on("connect", () => sock.write(headers.join("\r\n") + "\r\n\r\n"));
+    const onData = (d) => {
+      buf = Buffer.concat([buf, d]);
+      const end = buf.indexOf("\r\n\r\n");
+      if (end < 0) return;
+      sock.off("data", onData);
+      const status = Number(buf.toString("latin1", 9, 12));
+      const rest = buf.subarray(end + 4);
+      const messages = [];
+      let pending = rest;
+      const waiters = [];
+      const parse = () => {
+        while (pending.length >= 2) {
+          let len = pending[1] & 0x7f;
+          let at = 2;
+          if (len === 126) [len, at] = [pending.readUInt16BE(2), 4];
+          else if (len === 127) [len, at] = [Number(pending.readBigUInt64BE(2)), 10];
+          if (pending.length < at + len) return;
+          const op = pending[0] & 0x0f;
+          const payload = pending.subarray(at, at + len);
+          pending = pending.subarray(at + len);
+          const m = op === 1 ? JSON.parse(payload.toString("utf8")) : { op, code: payload.length >= 2 ? payload.readUInt16BE(0) : null };
+          const w = waiters.shift();
+          if (w) w(m);
+          else messages.push(m);
+        }
+      };
+      sock.on("data", (d2) => {
+        pending = Buffer.concat([pending, d2]);
+        parse();
+      });
+      parse();
+      const send = (obj) => {
+        const payload = Buffer.from(JSON.stringify(obj));
+        const mask = randomBytes(4);
+        const masked = Buffer.from(payload.map((b, i) => b ^ mask[i % 4]));
+        const head = payload.length < 126 ? Buffer.from([0x81, 0x80 | payload.length]) : Buffer.from([0x81, 0x80 | 126, payload.length >> 8, payload.length & 255]);
+        sock.write(Buffer.concat([head, mask, masked]));
+      };
+      const next = () => new Promise((r) => (messages.length ? r(messages.shift()) : waiters.push(r)));
+      resolve({ status, head: buf.toString("latin1", 0, end), send, next, sock });
+    };
+    sock.on("data", onData);
+  });
+}
+
+async function freePort() {
+  const srv = net.createServer();
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const { port } = srv.address();
+  await new Promise((r) => srv.close(r));
+  return port;
+}
+
+test("browser link: only 127.0.0.1, refuses no/wrong token, web origins and other hosts; runs calls once paired", async () => {
+  const port = await freePort();
+  const token = browser.newToken();
+  const changes = [];
+  const link = browser.createBrowserLink({ port, token, onChange: (s) => changes.push(s) });
+  assert.equal(await link.start(), true);
+  try {
+    const good = browser.PROTOCOL;
+    const refused = [
+      [{ protocols: "dronsio.v1, token.abc" }, 426, "old extension, token in the clear"],
+      [{}, 426, "no protocol"],
+      [{ protocols: good, origin: "https://evil.example" }, 403, "web page origin"],
+      [{ protocols: good, origin: "null" }, 403, "null origin"],
+      [{ protocols: good, origin: null }, 403, "no origin"],
+      [{ protocols: good, origin: "moz-extension://x" }, 403, "malformed extension origin"],
+      [{ protocols: good, host: `evil.example:${port}` }, 403, "DNS rebinding host"],
+    ];
+    for (const [opts, status, why] of refused) {
+      const c = await wsOpen(port, opts);
+      assert.equal(c.status, status, why);
+      c.sock.destroy();
+    }
+    assert.equal(link.status().connected, false);
+    await assert.rejects(link.call("tabs_list", {}), (e) => e.message === browser.NOT_CONNECTED);
+    // never reachable from the network: try every non-loopback address of this machine
+    for (const addr of Object.values(networkInterfaces()).flat().filter((a) => a && a.family === "IPv4" && !a.internal))
+      await assert.rejects(wsOpen(port, { protocols: good, address: addr.address }), /ECONNREFUSED/, addr.address);
+
+    // without the code: the challenge, then a wrong proof (or none) closes the connection, nothing runs
+    for (const hello of [{ type: "hello", browser: "X" }, { type: "hello", nonce: "a".repeat(64), proof: "0".repeat(64) }, { type: "hello", nonce: "a".repeat(64), proof: browser.proof(browser.newToken(), "client", "x", "a".repeat(64)) }]) {
+      const bad = await wsOpen(port, { protocols: good });
+      assert.equal(bad.status, 101);
+      const ch = await bad.next();
+      assert.equal(ch.type, "challenge");
+      bad.send(hello);
+      assert.equal((await bad.next()).code, 4004, JSON.stringify(hello));
+      bad.sock.destroy();
+    }
+    assert.equal(link.status().connected, false);
+
+    const c = await wsOpen(port, { protocols: good, origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop" });
+    assert.equal(c.status, 101);
+    assert(/Sec-WebSocket-Protocol: dronsio\.v2/i.test(c.head) && !c.head.includes(token), "answers the protocol, never echoes the token");
+    const challenge = await c.next();
+    assert.match(challenge.nonce, /^[a-f0-9]{64}$/);
+    const mine = randomBytes(32).toString("hex");
+    c.send({ type: "hello", nonce: mine, proof: browser.proof(token, "client", challenge.nonce, mine), browser: "Firefox 158", version: "1.0.0" });
+    const welcome = await c.next();
+    assert.deepEqual(welcome, { type: "welcome", proof: browser.proof(token, "server", challenge.nonce, mine) }, "the app proves it holds the code too");
+    for (let i = 0; i < 20 && !link.status().connected; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual([link.status().connected, link.status().browser], [true, "Firefox 158"]);
+    const pending = link.call("tabs_list", {});
+    const msg = await c.next();
+    assert.deepEqual([msg.type, msg.tool], ["call", "tabs_list"]);
+    c.send({ type: "result", id: msg.id, ok: true, result: { text: "[1] Exemplo — https://example.com" } });
+    assert.deepEqual(await pending, { text: "[1] Exemplo — https://example.com" });
+    const failing = link.call("click", { ref: "ref_1" });
+    const m2 = await c.next();
+    c.send({ type: "result", id: m2.id, ok: false, error: "O elemento ref_1 não existe mais" });
+    await assert.rejects(failing, /não existe mais/);
+    // a new pairing code drops the paired browser
+    const inFlight = link.call("read_page", {});
+    await c.next();
+    link.setToken(browser.newToken());
+    await assert.rejects(inFlight, /código de pareamento trocado/);
+    assert.equal(link.status().connected, false);
+    assert.equal((await c.next()).code, 4002);
+  } finally {
+    link.stop();
+  }
+  assert(changes.some((s) => s.connected) && !changes.at(-1).connected);
+});
+
+test("browser link: a busy port is reported, not thrown", async () => {
+  const blocker = net.createServer();
+  await new Promise((r) => blocker.listen(0, "127.0.0.1", r));
+  const link = browser.createBrowserLink({ port: blocker.address().port, token: browser.newToken() });
+  assert.equal(await link.start(), false);
+  assert.match(link.status().error, /já está em uso/);
+  link.stop();
+  blocker.close();
+});
+
+test("browser approvals: only the exact call the hook allowed, once, and not after it expires", async () => {
+  const ap = browser.approvals(200);
+  assert.equal(ap.take(B + "click", { ref: "ref_1" }), null, "never allowed");
+  ap.allow(B + "type", { text: "Oi", ref: "ref_1" });
+  assert.equal(ap.take(B + "type", { text: "Oi!", ref: "ref_1" }), null, "different text");
+  assert.deepEqual(ap.take(B + "type", { ref: "ref_1", text: "Oi" }), { site: null });
+  assert.equal(ap.take(B + "type", { ref: "ref_1", text: "Oi" }), null, "used once");
+  ap.allow(B + "key", { keys: "Enter" });
+  ap.allow(B + "key", { keys: "Enter" });
+  assert(ap.take(B + "key", { keys: "Enter" }) && ap.take(B + "key", { keys: "Enter" }), "two identical calls, two approvals");
+  // a confirmed call keeps the tab and site the user saw
+  ap.allow(B + "javascript", { code: "1" }, { tabId: 7, origin: "https://banco.example" });
+  assert.deepEqual(ap.take(B + "javascript", { code: "1" }), { site: { tabId: 7, origin: "https://banco.example" } });
+  ap.allow(B + "click", { ref: "ref_2" });
+  await new Promise((r) => setTimeout(r, 250));
+  assert.equal(ap.take(B + "click", { ref: "ref_2" }), null, "expired");
+});
+
+test("browser MCP server: lists the tools and passes calls to the app's bridge, errors included", async () => {
+  const seen = [];
+  const bridge = await agent.bridgeServer(async ({ tool, args }) => {
+    seen.push([tool, args]);
+    if (tool === "click") throw new Error("Ação não autorizada pelo DronsioFlow.");
+    return { text: `ok ${tool}`, image: tool === "screenshot" ? { data: "aGk=", mimeType: "image/jpeg" } : null };
+  });
+  assert.equal(statSync(bridge.socketPath).mode & 0o777, 0o600);
+  const mcp = spawn(process.execPath, [new URL("../app/native/browser_mcp.js", import.meta.url).pathname, bridge.socketPath], { stdio: ["pipe", "pipe", "inherit"] });
+  const replies = new Map();
+  const waiting = new Map();
+  mcp.stdout.on("data", agent.streamParser((m) => (waiting.has(m.id) ? (waiting.get(m.id)(m), waiting.delete(m.id)) : replies.set(m.id, m))));
+  let id = 0;
+  const rpc = (method, params) =>
+    new Promise((resolve) => {
+      const n = ++id;
+      waiting.set(n, resolve);
+      mcp.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: n, method, params }) + "\n");
+    });
+  try {
+    const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+    assert.equal(init.result.serverInfo.name, "dronsio_browser");
+    assert.equal(init.result.protocolVersion, "2025-06-18");
+    mcp.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+    const list = await rpc("tools/list", {});
+    assert.deepEqual(list.result.tools.map((t) => t.name), browser.TOOL_NAMES);
+    assert(list.result.tools.every((t) => !("readOnly" in t)));
+    const page = await rpc("tools/call", { name: "read_page", arguments: { filter: "interactive" } });
+    assert.deepEqual(page.result, { content: [{ type: "text", text: "ok read_page" }] });
+    const shot = await rpc("tools/call", { name: "screenshot", arguments: {} });
+    assert.deepEqual(shot.result.content[1], { type: "image", data: "aGk=", mimeType: "image/jpeg" });
+    const refused = await rpc("tools/call", { name: "click", arguments: { ref: "ref_1" } });
+    assert.equal(refused.result.isError, true);
+    assert.equal(refused.result.content[0].text, "Ação não autorizada pelo DronsioFlow.");
+    const unknown = await rpc("tools/call", { name: "shell", arguments: { cmd: "id" } });
+    assert.equal(unknown.result.isError, true);
+    assert.deepEqual(seen.map(([t]) => t), ["read_page", "screenshot", "click"], "unknown tools never reach the app");
+    assert.equal((await rpc("nope/method", {})).error.code, -32601);
+  } finally {
+    mcp.kill();
+    bridge.close();
+  }
+  // the app gone: the call fails cleanly instead of hanging
+  const orphan = spawn(process.execPath, [new URL("../app/native/browser_mcp.js", import.meta.url).pathname, bridge.socketPath], { stdio: ["pipe", "pipe", "inherit"] });
+  const reply = await new Promise((resolve) => {
+    orphan.stdout.on("data", agent.streamParser(resolve));
+    orphan.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "tabs_list", arguments: {} } }) + "\n");
+  });
+  orphan.kill();
+  assert.equal(reply.result.isError, true);
+  assert.match(reply.result.content[0].text, /DronsioFlow indisponível/);
+});
+
+// --- the extension itself (app/extension/background.js) in a fake browser, against fake and real servers ---
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms = 3000) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleepMs(20)) if (fn()) return true;
+  return false;
+}
+
+/** Loads background.js with a fake WebExtension API: two tabs, every script run recorded. */
+function fakeExtension(code) {
+  const vm = require("vm");
+  const timers = new Set();
+  const tabs = new Map([
+    [1, { id: 1, windowId: 1, active: true, title: "Banco", url: "https://banco.example/conta" }],
+    [2, { id: 2, windowId: 1, active: false, title: "Busca", url: "https://busca.example/" }],
+  ]);
+  const ran = [];
+  const sockets = [];
+  const storage = { code };
+  const ev = () => ({ addListener() {}, removeListener() {} });
+  const ctx = {
+    console, URL, TextEncoder, crypto: globalThis.crypto, navigator: {}, location: null,
+    setTimeout: (f, ms) => { const t = setTimeout(() => (timers.delete(t), f()), ms); timers.add(t); return t; },
+    clearTimeout: (t) => (timers.delete(t), clearTimeout(t)),
+    WebSocket: class extends WebSocket {
+      constructor(url, protocols) {
+        super(url, { protocols, headers: { Origin: "moz-extension://0123abcd-0000-4000-8000-000000000000" } });
+        sockets.push(this);
+      }
+    },
+  };
+  const origin = (u) => new URL(u).origin;
+  ctx.browser = {
+    runtime: { id: "x", getManifest: () => ({ version: "1.0.0" }), getBrowserInfo: async () => ({ name: "Firefox", version: "158.0" }), sendMessage: async () => {}, getPlatformInfo: async () => ({}), getURL: (p) => `moz-extension://x/${p}`, onMessage: ev(), onStartup: ev() },
+    storage: { local: { get: async (keys) => Object.fromEntries(keys.map((k) => [k, storage[k]])), set: async (o) => Object.assign(storage, o), remove: async (ks) => ks.forEach((k) => delete storage[k]) } },
+    alarms: { create() {}, onAlarm: ev() },
+    tabs: {
+      get: async (id) => tabs.get(id) ?? Promise.reject(new Error("no tab")),
+      query: async (q) => [...tabs.values()].filter((t) => !q.active || t.active),
+      onUpdated: ev(),
+    },
+    scripting: {
+      executeScript: async ({ target, files, func, args }) => {
+        if (files) return [{}];
+        ran.push({ tabId: target.tabId, args });
+        // the page's own location: may differ from what tabs.get said a moment before (a navigation)
+        ctx.location = { origin: origin(tabs.get(target.tabId).pageUrl || tabs.get(target.tabId).url) };
+        return [{ result: await func(...args) }];
+      },
+    },
+  };
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(readFileSync(new URL("../app/extension/background.js", import.meta.url), "utf8"), ctx);
+  const stop = () => {
+    delete storage.code; // no code: the reconnect loop ends
+    for (const t of timers) clearTimeout(t);
+    for (const s of sockets) s.close();
+  };
+  return { ctx, tabs, ran, sockets, stop };
+}
+
+/** A program that grabbed the port first: accepts any WebSocket, records everything the extension sends. */
+async function impostor(script) {
+  const http = require("http");
+  const seen = { headers: null, raw: [], messages: [], closed: false };
+  const server = http.createServer();
+  server.on("upgrade", async (req, sock) => {
+    seen.headers = req.headers;
+    const key = require("crypto").createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${key}\r\nSec-WebSocket-Protocol: dronsio.v2\r\n\r\n`);
+    let buf = Buffer.alloc(0);
+    const waiters = [];
+    sock.on("data", (d) => {
+      seen.raw.push(d);
+      buf = Buffer.concat([buf, d]);
+      while (buf.length >= 6) {
+        let len = buf[1] & 0x7f;
+        let at = 2;
+        if (len === 126) [len, at] = [buf.readUInt16BE(2), 4];
+        if (buf.length < at + 4 + len) return;
+        const mask = buf.subarray(at, at + 4);
+        const payload = Buffer.from(buf.subarray(at + 4, at + 4 + len).map((b, i) => b ^ mask[i % 4]));
+        const op = buf[0] & 0x0f;
+        buf = buf.subarray(at + 4 + len);
+        if (op === 8) seen.closed = true;
+        else if (op === 1) {
+          seen.messages.push(payload.toString("utf8"));
+          waiters.shift()?.();
+        }
+      }
+    });
+    sock.on("close", () => (seen.closed = true));
+    sock.on("error", () => {});
+    const send = (obj) => {
+      const p = Buffer.from(JSON.stringify(obj));
+      sock.write(Buffer.concat([Buffer.from(p.length < 126 ? [0x81, p.length] : [0x81, 126, p.length >> 8, p.length & 255]), p]));
+    };
+    const reply = () => new Promise((r) => (seen.messages.length > waiters.length ? r() : waiters.push(r)));
+    await script({ send, reply, seen });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { port: server.address().port, seen, close: () => server.close() };
+}
+
+test("extension: a program on the port without the code gets no token and runs nothing", async () => {
+  const token = browser.newToken();
+  const steal = { type: "call", id: 1, tool: "javascript", args: { code: "document.cookie", tabId: 1 } };
+  const scripts = {
+    "call right away": async ({ send }) => send(steal),
+    "call after the challenge": async ({ send, reply }) => {
+      send({ type: "challenge", nonce: "b".repeat(64) });
+      await reply();
+      send(steal);
+    },
+    "forged welcome, then call": async ({ send, reply }) => {
+      send({ type: "challenge", nonce: "b".repeat(64) });
+      await reply();
+      send({ type: "welcome", proof: "0".repeat(64) });
+      send(steal);
+    },
+    "replayed hello as welcome": async ({ send, reply, seen }) => {
+      send({ type: "challenge", nonce: "b".repeat(64) });
+      await reply();
+      send({ type: "welcome", proof: JSON.parse(seen.messages[0]).proof });
+      send(steal);
+    },
+  };
+  for (const [name, script] of Object.entries(scripts)) {
+    const fake = await impostor(script);
+    const ext = fakeExtension(`DF1-${fake.port}-${token}`);
+    try {
+      assert(await until(() => fake.seen.closed), `${name}: the extension closes the connection`);
+      await sleepMs(100);
+      assert.deepEqual(ext.ran, [], `${name}: nothing ran in a tab`);
+      assert(!Buffer.concat(fake.seen.raw).toString("latin1").includes(token) && !JSON.stringify(fake.seen.headers).includes(token), `${name}: the token never travels`);
+      assert(fake.seen.messages.every((m) => !m.includes(token)) && fake.seen.messages.every((m) => JSON.parse(m).type === "hello"), `${name}: only the hello was sent`);
+      assert.equal(fake.seen.headers["sec-websocket-protocol"], "dronsio.v2");
+    } finally {
+      ext.stop();
+      fake.close();
+    }
+  }
+});
+
+test("extension: with the right code it pairs and runs calls; a confirmed call only on its tab and site", async () => {
+  const port = await freePort();
+  const token = browser.newToken();
+  const link = browser.createBrowserLink({ port, token });
+  await link.start();
+  const ext = fakeExtension(`DF1-${port}-${token}`);
+  try {
+    assert(await until(() => link.status().connected), "paired");
+    assert.equal(link.status().browser, "Firefox 158");
+    assert.match((await link.call("tabs_list", {})).text, /\[1\] \(ativa\) Banco — https:\/\/banco\.example\/conta/);
+    assert.deepEqual(await link.call("tab_info", { tabId: 2 }), { tabId: 2, title: "Busca", url: "https://busca.example/", origin: "https://busca.example" });
+    // confirmed on tab 1 (banco): runs there even if the call names no tab
+    const expect = { tabId: 1, origin: "https://banco.example" };
+    assert.deepEqual(await link.call("javascript", { code: "6*7" }, { expect }), { text: "42" });
+    assert.equal(ext.ran.at(-1).tabId, 1);
+    // another tab or another site: refused before anything runs
+    const before = ext.ran.length;
+    await assert.rejects(link.call("javascript", { code: "1" }, { expect: { tabId: 2, origin: "https://banco.example" } }), /mudou de site/);
+    await assert.rejects(link.call("javascript", { code: "1" }, { expect: { tabId: 9, origin: "https://banco.example" } }), /não existe mais/);
+    ext.tabs.get(1).url = "https://outro.example/";
+    await assert.rejects(link.call("javascript", { code: "1" }, { expect }), /mudou de site/);
+    await assert.rejects(link.call("tab_close", {}, { expect }), /mudou de site/);
+    assert.equal(ext.ran.length, before, "nothing ran");
+    // the page navigated between the check and the run: the page itself refuses
+    ext.tabs.get(1).url = "https://banco.example/conta";
+    ext.tabs.get(1).pageUrl = "https://outro.example/";
+    await assert.rejects(link.call("javascript", { code: "1" }, { expect }), /mudou de site/);
+    await assert.rejects(link.call("click", { ref: "ref_1" }, { expect }), /mudou de site/);
+  } finally {
+    ext.stop();
+    link.stop();
+  }
+});
+
+test("extension: a wrong code is refused by the app and never pairs", async () => {
+  const port = await freePort();
+  const link = browser.createBrowserLink({ port, token: browser.newToken() });
+  await link.start();
+  const ext = fakeExtension(`DF1-${port}-${browser.newToken()}`);
+  try {
+    assert(await until(() => ext.sockets.length && ext.sockets[0].readyState === WebSocket.CLOSED), "closed");
+    assert.equal(link.status().connected, false);
+  } finally {
+    ext.stop();
+    link.stop();
+  }
 });
 
 let failed = 0;
