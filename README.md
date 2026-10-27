@@ -50,13 +50,15 @@ sudo ./setup-permissions.sh     # uma vez: acesso ao teclado (atalho global) e a
 ```
 
 Abra **DronsioFlow** pelo menu de aplicativos (ou rode `dronsioflow`). Na primeira vez, o modelo de voz escolhido
-é baixado (Small ≈ 480 MB). O instalador verifica as dependências e avisa o que faltar.
+é baixado (Small ≈ 480 MB). O instalador verifica as dependências e avisa o que faltar. Para o modo agente usar o
+navegador, instale também a [extensão do DronsioFlow](#extensão-do-navegador).
 
 > `setup-permissions.sh` cria uma regra udev que dá ao usuário da sessão ativa acesso aos teclados e ao `/dev/uinput`.
 > É o que permite o atalho global e a colagem no Wayland, mas também significa que outros programas do seu
 > usuário podem ler o teclado. Para desfazer, veja [Desinstalar](#desinstalar).
 
-Para atualizar: `git pull` e `./install.sh` de novo.
+Para atualizar: `git pull` e `./install.sh` de novo. A extensão do navegador não se atualiza sozinha: veja
+"Atualizar a extensão" em [Extensão do navegador](#extensão-do-navegador).
 
 ## Atalhos
 
@@ -279,6 +281,17 @@ controla o navegador que você já usa, sem reiniciá-lo, e só conversa com o D
    quando o navegador ou o DronsioFlow abrem de novo. No Firefox, se aparecer o aviso de acesso aos sites, clique em
    **Permitir acesso aos sites**.
 
+**Atualizar a extensão**: o navegador não atualiza a extensão sozinho. Sempre que atualizar o DronsioFlow (`git pull`
+e `./install.sh`), instale a extensão de novo:
+- **Zen, LibreWolf, Firefox Developer Edition/Nightly/ESR**: instale o novo
+  `~/.local/opt/dronsioflow/dronsioflow-extension.xpi` em `about:addons`, como na primeira vez. Ele substitui o antigo.
+- **Firefox normal (temporária)**: em `about:debugging` → **Este Firefox**, clique em **Recarregar** na extensão.
+- **Chrome, Brave, Edge**: em `chrome://extensions` (ou `brave://extensions`, `edge://extensions`), clique no botão
+  de recarregar da extensão.
+
+O pareamento continua: a extensão mantém o mesmo id e o código guardado, e se reconecta sozinha. Se o ícone mostrar
+**Não pareada**, cole o código de novo.
+
 Segurança e limites:
 - A conexão é um WebSocket em `127.0.0.1` (nunca na rede). O app recusa conexões com origem que não seja uma extensão
   (`moz-extension://`, `chrome-extension://`) ou com outro endereço de host, o que barra páginas da web e truques de
@@ -447,6 +460,10 @@ rm -rf ~/.local/opt/dronsioflow ~/.local/share/dronsioflow ~/.config/DronsioFlow
        ~/.config/autostart/dronsioflow.desktop
 sudo rm -f /etc/udev/rules.d/70-dronsioflow.rules /etc/modules-load.d/dronsioflow-uinput.conf
 ```
+
+Se instalou a extensão do navegador, remova-a em `about:addons` (Zen, LibreWolf, Firefox) ou em `chrome://extensions`
+(Chrome, Brave, Edge). No Zen, no LibreWolf e no Firefox, se você mudou `xpinstall.signatures.required` para `false`,
+volte-o para `true` em `about:config`.
 
 ## Licença
 
