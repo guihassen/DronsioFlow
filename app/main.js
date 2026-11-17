@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS = {
     agent: [KEY.ctrl, KEY.super, KEY.shift], // like command mode: add Shift to Ctrl+Super
     pasteLast: [KEY.shift, KEY.alt, KEY.z],
     copyLast: [KEY.shift, KEY.alt, KEY.x],
+    swapLast: [], // pastes the other version of the last dictation (local formatter on or shadow)
     cycleStyle: [], // switches to the next writing style
     "style:natural": [],
     "style:formal": [],
@@ -67,6 +68,9 @@ const DEFAULT_SETTINGS = {
   ai: {
     enabled: true, // Ollama features: command mode, transforms, meeting summaries
     formatDictation: false, // also rewrite every dictation (slow on CPU: ~8 s)
+    // local formatting model (formatter_helper.py): "off" | "on" (formats every dictation) |
+    // "shadow" (runs beside the usual formatting and keeps its version in the history, to compare)
+    formatter: "off",
     model: "",
     style: "natural",
     removeFillers: true,
@@ -170,6 +174,8 @@ const state = {
   locked: false, // hands-free
   step: null, // transcribing | formatting
   model: { name: settings.model, state: "idle", progress: 0, error: null },
+  // local formatting model: idle (process not running) | downloading | loading | ready | error
+  formatter: { state: "idle", progress: 0, error: null },
   input: { keyboards: 0, uinput: false, running: false },
   ollama: { available: false, models: [] },
   meeting: { recording: false, startedAt: 0, processing: false, progress: 0, step: null },
@@ -350,6 +356,116 @@ function onEngineMessage(msg) {
     pending.get(msg.id)?.onProgress?.(msg.progress);
   } else if (msg.t === "result") {
     settle(msg);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Local formatting model (formatter_helper.py): removes fillers, restarts and self-corrections and
+// punctuates, word by word, in ~50 ms. Started when needed and stopped when idle, since it holds
+// ~700 MB of memory.
+// ---------------------------------------------------------------------------
+
+const FORMATTER_IDLE_MS = 10 * 60 * 1000; // stop the process after this long without a dictation
+const FORMATTER_WAIT_MS = 6000; // at most this long waiting for the model to load before a dictation
+const FORMATTER_TIMEOUT_MS = 2000; // one formatting request
+
+let formatter = null; // child process
+let formatterReady = null; // Promise: resolves when the model is loaded, rejects if it can't be
+let formatterIdle = null;
+const formatterRequests = new Set(); // ids in `pending` that belong to the formatter
+
+const formatterWanted = () => settings.ai.formatter === "on" || settings.ai.formatter === "shadow";
+
+function setFormatterState(next) {
+  state.formatter = { ...state.formatter, ...next };
+  broadcast();
+}
+
+/** Starts the formatter process and loads the model (downloading it the first time). Safe to call often. */
+function startFormatter() {
+  if (formatterReady) return formatterReady;
+  formatterReady = new Promise((resolve, reject) => {
+    setFormatterState({ state: "loading", progress: 0, error: null });
+    const child = spawnJsonProcess("formatter", "formatter_helper.py", (msg) => {
+      if (msg.t === "model") {
+        setFormatterState({ state: msg.state, progress: msg.progress ?? state.formatter.progress, error: msg.error || null });
+        if (msg.state === "ready") resolve();
+        if (msg.state === "error") {
+          logStep(`formatter failed to load: ${msg.error}`);
+          reject(new Error(msg.error));
+          child.send({ cmd: "quit" });
+        }
+      } else if (msg.t === "result") {
+        formatterRequests.delete(msg.id);
+        settle(msg);
+      }
+    }, () => {
+      if (formatter === child) {
+        formatter = null;
+        formatterReady = null;
+        if (state.formatter.state !== "error") setFormatterState({ state: "idle", progress: 0 });
+      }
+      reject(new Error("formatador encerrado"));
+      for (const id of formatterRequests) {
+        pending.get(id)?.reject(new Error("formatador encerrado"));
+        pending.delete(id);
+      }
+      formatterRequests.clear();
+    });
+    formatter = child;
+    child.send({ cmd: "load" });
+  });
+  formatterReady.catch(() => {}); // a failed load is reported through state.formatter and the log
+  touchFormatter();
+  return formatterReady;
+}
+
+function stopFormatter() {
+  clearTimeout(formatterIdle);
+  if (formatter) formatter.send({ cmd: "quit" });
+  else setFormatterState({ state: "idle", progress: 0, error: null });
+}
+
+/** Pushes the idle shutdown back: the process stays while dictations keep coming. */
+function touchFormatter() {
+  clearTimeout(formatterIdle);
+  formatterIdle = setTimeout(() => {
+    logStep("formatter stopped after being idle");
+    stopFormatter();
+  }, FORMATTER_IDLE_MS);
+}
+
+/** Loads the model while the user speaks, so it is ready when the dictation ends. */
+function warmLocalFormatter() {
+  if (formatterWanted()) startFormatter();
+}
+
+/** Formatted text from the local model, or null when it is off, not ready in time or fails. */
+async function formatWithModel(raw) {
+  if (!formatterWanted()) return null;
+  try {
+    await Promise.race([
+      startFormatter(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("modelo ainda carregando")), FORMATTER_WAIT_MS)),
+    ]);
+    touchFormatter();
+    const id = newId();
+    formatterRequests.add(id);
+    const promise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        formatterRequests.delete(id);
+        reject(new Error("tempo esgotado"));
+      }, FORMATTER_TIMEOUT_MS);
+      pending.set(id, { resolve: (v) => (clearTimeout(timer), resolve(v)), reject: (e) => (clearTimeout(timer), reject(e)) });
+    });
+    formatter.send({ cmd: "format", id, text: raw });
+    const result = await promise;
+    logStep(`local formatter in ${result.ms}ms`);
+    return result.text || null;
+  } catch (e) {
+    logStep(`local formatter skipped: ${e.message}`);
+    return null;
   }
 }
 
@@ -554,6 +670,8 @@ function onKeyDown(code) {
     if (history[0]) pasteOrCopy(history[0].text);
   } else if (hit.name === "copyLast") {
     if (history[0]) clipboard.writeText(history[0].text);
+  } else if (hit.name === "swapLast") {
+    swapLastDictation();
   } else if (hit.name.startsWith("polish:")) {
     runPolish(hit.name.slice(7));
   } else if (hit.name === "cycleStyle" || hit.name.startsWith("style:")) {
@@ -576,6 +694,7 @@ const SHORTCUT_NAMES = {
   agent: "Modo agente",
   pasteLast: "Colar o último ditado",
   copyLast: "Copiar o último ditado",
+  swapLast: "Trocar pela outra versão",
   cycleStyle: "Alternar estilo",
   ...Object.fromEntries(STYLE_ORDER.map((id) => [`style:${id}`, `Estilo ${STYLE_NAMES[id]}`])),
 };
@@ -686,7 +805,10 @@ function startRecording(mode, keys, locked) {
   selectionPromise = mode === "command" ? readSelection() : null;
   if (mode === "command") {
     if (aiReady()) llm.warm(settings.ai.model); // load the model for the command
-  } else if (mode !== "agent") warmFormatting(); // evaluate the prompt while the user speaks
+  } else if (mode !== "agent") {
+    warmFormatting(); // evaluate the prompt while the user speaks
+    warmLocalFormatter(); // and load the local model, if it was stopped
+  }
   playSound("start");
   maxTimer = setTimeout(stopRecording, MAX_RECORDING_MS);
   silenceTimer = setTimeout(checkMicrophoneDelivers, NO_AUDIO_TIMEOUT_MS);
@@ -851,13 +973,31 @@ async function stopRecording() {
   }
 }
 
+/**
+ * The text to paste and, with the local formatter on or in shadow mode, the other version of it:
+ * { text, alternate, alternateSource: "model" | "usual" (rules and LLM, as without the model) | null }.
+ */
 async function formatDictation(raw, whisperLanguage) {
-  let fixed = text.applyDictionary(raw, settings.dictionary);
-  if (settings.ai.removeFillers) fixed = text.removeFillers(fixed); // instant, works without the LLM
+  const local = settings.ai.formatter; // decided now, not when the model answers
+  const spokenText = text.applyDictionary(raw, settings.dictionary);
+  // The model gets the words as spoken (it removes the fillers itself) and runs beside the rest.
+  const modelText = local === "on" || local === "shadow" ? formatWithModel(spokenText) : Promise.resolve(null);
+  const rulesText = settings.ai.removeFillers ? text.removeFillers(spokenText) : spokenText; // instant, no AI
   const technical = settings.ai.style === "technical" && useLlmFormatting();
+  const snippet = text.exactSnippet(technical ? text.spokenPaths(rulesText) : rulesText, settings.snippets);
+  if (snippet !== null) return { text: snippet, alternate: null, alternateSource: null };
+  let fixed = rulesText;
+  let alternate = null;
+  if (local === "on") {
+    state.step = "formatting";
+    broadcast();
+    const formatted = await modelText; // null when the model is not ready or failed: the rules stay
+    if (formatted) {
+      alternate = rulesText;
+      fixed = formatted;
+    }
+  }
   if (technical) fixed = text.spokenPaths(fixed);
-  const snippet = text.exactSnippet(fixed, settings.snippets);
-  if (snippet !== null) return snippet;
   let out = fixed;
   if (useLlmFormatting()) {
     state.step = "formatting";
@@ -880,8 +1020,13 @@ async function formatDictation(raw, whisperLanguage) {
       setError(`IA indisponível, usei o texto sem formatação (${e.message}).`);
     }
   }
-  if (technical) out = text.fileMentions(out); // done here, not by the LLM, so paths are never invented
-  return text.expandSnippets(out, settings.snippets);
+  if (local === "shadow") alternate = await modelText;
+  // done here, not by the LLM, so paths are never invented
+  const finish = (s) => text.expandSnippets(technical ? text.fileMentions(s) : s, settings.snippets);
+  const final = finish(out);
+  const other = alternate ? finish(alternate) : null;
+  if (!other || other === final) return { text: final, alternate: null, alternateSource: null };
+  return { text: final, alternate: other, alternateSource: local === "on" ? "usual" : "model" };
 }
 
 function addHistory(entry) {
@@ -891,7 +1036,7 @@ function addHistory(entry) {
 }
 
 async function handleDictation(raw, durationMs, processingMs, asNote, language) {
-  const final = await formatDictation(raw, language);
+  const { text: final, alternate, alternateSource } = await formatDictation(raw, language);
   if (!final) return;
   if (asNote) {
     notes.unshift({ id: newId(), at: new Date().toISOString(), text: final });
@@ -900,7 +1045,24 @@ async function handleDictation(raw, durationMs, processingMs, asNote, language) 
   } else {
     await pasteOrCopy(final, { returnFocus: !startedInOwnWindow });
   }
-  addHistory({ text: final, raw, durationMs, processingMs, kind: asNote ? "note" : "dictation" });
+  // alt: the other version (local model or rules), kept to compare and for the swapLast shortcut
+  const other = alternate ? { alt: alternate, altSource: alternateSource, formatter: settings.ai.formatter } : {};
+  addHistory({ text: final, raw, durationMs, processingMs, kind: asNote ? "note" : "dictation", ...other });
+}
+
+/** Pastes the other version of the last dictation and swaps the two in the history (press again to undo). */
+async function swapLastDictation() {
+  const last = history[0];
+  if (!last?.alt) {
+    flash("Sem outra versão do último ditado");
+    return;
+  }
+  const entry = { ...last, text: last.alt, alt: last.text, altSource: last.altSource === "model" ? "usual" : "model", swaps: (last.swaps || 0) + 1 };
+  history[0] = entry;
+  writeJson(FILES.history, history);
+  logStep(`swapped last dictation (${entry.swaps}x)`);
+  broadcast();
+  await pasteOrCopy(entry.text);
 }
 
 async function handleCommand(instruction, durationMs) {
@@ -1545,6 +1707,11 @@ ipcMain.handle("set-settings", (_e, patch) => {
   if ("theme" in patch) nativeTheme.themeSource = settings.theme;
   if ("microphone" in patch) state.mic = chooseMicrophone();
   if (patch.ai || patch.dictionary) warmFormatting();
+  if (patch.ai && settings.ai.formatter !== before.ai.formatter) {
+    // turning it on downloads and loads the model right away, so the first dictation can use it
+    if (formatterWanted()) startFormatter();
+    else stopFormatter();
+  }
   if (patch.agent) refreshAgentBin();
   if (patch.agent && settings.agent.browserPort !== before.agent.browserPort) startBrowserLink();
   broadcast();
@@ -1673,6 +1840,7 @@ app.on("before-quit", () => {
   for (const p of meetingProcs) p.kill("SIGTERM");
   inputHelper?.send({ cmd: "quit" });
   engine?.send({ cmd: "quit" });
+  formatter?.send({ cmd: "quit" });
 });
 app.on("window-all-closed", (e) => e.preventDefault());
 
