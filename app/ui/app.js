@@ -374,6 +374,18 @@ const STYLES = [
   ["technical", "Técnico.", "Para prompts e ordens a agentes de código, como o Claude Code", "Revise o @auth.js e corrija o bug do refresh token. Depois rode `npm test`."],
 ];
 
+/** One line about the local formatter model under its option ("" when off or idle). */
+function formatterStatus(f, mode) {
+  if (mode === "off" || !f) return "";
+  const line = {
+    downloading: `Baixando o modelo… ${Math.round((f.progress || 0) * 100)}%`,
+    loading: "Carregando o modelo…",
+    ready: "Modelo pronto.",
+    error: `Não foi possível carregar o modelo: ${f.error || "erro desconhecido"}`,
+  }[f.state];
+  return line ? `<br><strong>${esc(line)}</strong>` : "";
+}
+
 function pageStyle() {
   const { settings, state } = S;
   const ai = settings.ai;
@@ -397,6 +409,8 @@ function pageStyle() {
     <div class="group">
       <div class="item"><div><h4>Formatação com IA</h4><p>Reescreve cada ditado no estilo escolhido, aplica autocorreções e monta listas. Neste computador, acrescenta cerca de 8 s por ditado.</p></div><div class="control">${sw(ai.formatDictation && ai.enabled, 'data-ai="formatDictation"')}</div></div>
       <div class="item"><div><h4>Remover hesitações</h4><p>"hum", "ahn", "é…". Instantâneo, funciona mesmo sem IA.</p></div><div class="control">${sw(ai.removeFillers, 'data-ai="removeFillers"')}</div></div>
+      <div class="item"><div><h4>Formatador local</h4><p>Um modelo pequeno, treinado para ditado, apaga hesitações, repetições e correções ("na terça, não, na quarta") e pontua o texto em menos de 0,1 s, sem o Ollama. Baixa 470 MB na primeira vez. "Comparar" cola o texto de sempre e guarda a versão do modelo no histórico; o atalho "Trocar pela outra versão" cola a outra.${formatterStatus(state.formatter, ai.formatter)}</p></div><div class="control">
+        <select class="select" data-ai-select="formatter">${optionList([["off", "Desligado"], ["on", "Ligado"], ["shadow", "Comparar"]], ai.formatter)}</select></div></div>
       <div class="item"><div><h4>Autocorreções</h4><p>"às três, não, às quatro" vira "às quatro". Requer a formatação com IA.</p></div><div class="control">${sw(ai.selfCorrections, 'data-ai="selfCorrections"')}</div></div>
       <div class="item"><div><h4>Listas automáticas</h4><p>"primeiro…, segundo…" vira uma lista. Requer a formatação com IA.</p></div><div class="control">${sw(ai.lists, 'data-ai="lists"')}</div></div>
       <div class="item"><div><h4>Traduzir para</h4><p>Fale em um idioma e cole em outro.</p></div><div class="control">
@@ -471,6 +485,7 @@ const SHORTCUTS = [
   ["agent", "Modo agente", "Fale uma tarefa e o Claude Code a executa no computador. Ações arriscadas e envios pedem confirmação; Esc cancela. Os outros atalhos seguem funcionando enquanto ele trabalha."],
   ["pasteLast", "Colar o último ditado", "Cola de novo a última transcrição."],
   ["copyLast", "Copiar o último ditado", "Copia a última transcrição."],
+  ["swapLast", "Trocar pela outra versão", "Com o formatador local ligado ou comparando: desfaça o último ditado (Ctrl+Z) e aperte para colar a outra versão. Apertar de novo volta a anterior."],
 ];
 
 const SETTINGS_TABS = [

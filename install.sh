@@ -35,6 +35,15 @@ fi
 "$DATA/venv/bin/python" -c "import faster_whisper" 2>/dev/null \
   || "$DATA/venv/bin/pip" install --quiet --disable-pip-version-check faster-whisper
 
+# Local formatter (optional, ~800 MB): DRONSIO_FORMATTER=1 ./install.sh. CPU-only torch, no CUDA.
+if [ "${DRONSIO_FORMATTER:-0}" = "1" ]; then
+  echo "==> Formatador local (torch para CPU e transformers)"
+  "$DATA/venv/bin/python" -c "import torch, transformers" 2>/dev/null || {
+    "$DATA/venv/bin/pip" install --quiet --disable-pip-version-check torch --index-url https://download.pytorch.org/whl/cpu
+    "$DATA/venv/bin/pip" install --quiet --disable-pip-version-check transformers
+  }
+fi
+
 echo "==> Electron $ELECTRON_VERSION"
 if [ ! -x "$VENDOR/node_modules/electron/dist/electron" ]; then
   mkdir -p "$VENDOR"

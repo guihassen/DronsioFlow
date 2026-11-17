@@ -57,6 +57,13 @@ navegador, instale também a [extensão do DronsioFlow](#extensão-do-navegador)
 > É o que permite o atalho global e a colagem no Wayland, mas também significa que outros programas do seu
 > usuário podem ler o teclado. Para desfazer, veja [Desinstalar](#desinstalar).
 
+Para usar o [formatador local](#formatador-local), instale também o torch para CPU e o transformers (cerca de
+800 MB a mais no ambiente Python):
+
+```bash
+DRONSIO_FORMATTER=1 ./install.sh
+```
+
 Para atualizar: `git pull` e `./install.sh` de novo. A extensão do navegador não se atualiza sozinha: veja
 "Atualizar a extensão" em [Extensão do navegador](#extensão-do-navegador).
 
@@ -74,6 +81,7 @@ Funcionam em qualquer app, mesmo com a janela fechada.
 | Modo agente | Ctrl + Super + Shift (segurar) | fala uma tarefa para o Claude Code executar (veja [Modo agente](#modo-agente)); se essa combinação já era sua, o modo fica sem atalho até você escolher um |
 | Colar o último ditado | Shift + Alt + Z | cola de novo a última transcrição |
 | Copiar o último ditado | Shift + Alt + X | copia a última transcrição |
+| Trocar pela outra versão | sem padrão (defina nas configurações) | com o [formatador local](#formatador-local) ligado ou comparando: desfaça o último ditado (Ctrl+Z) e aperte para colar a outra versão; apertar de novo volta a anterior |
 | Transformações | um atalho por transformação | reescreve o texto selecionado |
 | Mudar de estilo | sem padrão (sugestão: Ctrl + Alt + 1…4) | um atalho por estilo e um para alternar entre eles; a barra flutuante mostra o novo estilo |
 | Cancelar | Esc | descarta a gravação atual; sem gravação, interrompe o agente |
@@ -146,6 +154,36 @@ laterais do mouse. Ctrl/Shift/Alt/Super da direita e da esquerda contam como a m
   quatro") e **listas automáticas** ("primeiro…, segundo…" vira lista) — estas duas com IA.
 - **Tradução** do ditado para inglês, espanhol, português, francês, alemão ou italiano. Inglês funciona sem IA
   (o próprio Whisper traduz); os outros idiomas usam a IA.
+- **Formatador local**: veja abaixo.
+
+#### Formatador local
+
+Um modelo pequeno, treinado só para ditado em português e inglês
+([guihassen/formatter](https://huggingface.co/guihassen/formatter), código em
+[guihassen/Formatter](https://github.com/guihassen/Formatter)). Ele decide palavra por palavra o que manter, o que
+apagar e qual pontuação vem depois, então nunca inventa nem troca palavras.
+
+```text
+Whisper:     ahn eu vou eu vou comprar pão amanhã você vem comigo
+Formatador:  Eu vou comprar pão amanhã. Você vem comigo?
+```
+
+- Apaga hesitações, repetições, recomeços e correções ("na terça, não, na quarta" vira "na quarta") e coloca
+  vírgulas, pontos, interrogações e maiúsculas, em cerca de 50 ms por ditado, na CPU e sem o Ollama.
+- Quando o Whisper ouve uma pergunta ("?") e o modelo termina a frase com ponto, fica a interrogação: o Whisper
+  ouve a entonação, o modelo só vê as palavras.
+- Em **Estilo → Limpeza automática → Formatador local**:
+  - **Desligado**: tudo como antes;
+  - **Ligado**: o modelo formata cada ditado (no lugar da remoção de hesitações por regras). Se a formatação com
+    IA também estiver ligada, ela recebe o texto já limpo;
+  - **Comparar**: cola o texto de sempre e guarda a versão do modelo no histórico (`alt` em `history.json`), para
+    comparar as duas no uso real.
+- Com **Ligado** ou **Comparar**, o atalho **Trocar pela outra versão** cola a outra versão do último ditado.
+  Cada troca fica registrada no histórico (`swaps`).
+- O modelo (470 MB) é baixado do Hugging Face na primeira vez, para `~/.local/share/dronsioflow/models/formatter/`.
+  Ele carrega enquanto você fala e é fechado depois de 10 minutos sem ditados, para devolver a memória (cerca de
+  700 MB). Se não estiver pronto a tempo, o ditado sai com a formatação de sempre.
+- Precisa do torch e do transformers: `DRONSIO_FORMATTER=1 ./install.sh`.
 
 ### Transformações
 
@@ -420,12 +458,14 @@ app/native/browser_mcp.js   servidor MCP (stdio) das ferramentas do navegador; r
 app/extension/              extensão do navegador (WebExtension MV3, Firefox e Chromium)
 app/native/input_helper.py  lê teclado/mouse (evdev) e cola (wl-copy/xclip + tecla simulada via uinput)
 app/native/transcriber.py   motor Whisper local (baixa o modelo do Hugging Face na 1ª vez)
+app/native/formatter_helper.py  formatador local opcional (classificação por palavra, torch na CPU)
 app/ui/                     interface (páginas, modais, tema claro/escuro e a barra flutuante)
 app/assets/                 ícone, sons e fontes (Figtree e EB Garamond)
 tools/                      ferramentas de desenvolvimento
 ```
 
-- A gravação usa `parecord` a 16 kHz mono. O Python só roda o Whisper e o helper de teclado.
+- A gravação usa `parecord` a 16 kHz mono. O Python só roda o Whisper, o helper de teclado e, se ligado, o
+  formatador local.
 - O volume de fala baixa é ajustado automaticamente, e frases que o Whisper costuma "inventar" no silêncio são
   descartadas.
 - Dados: configurações e histórico em `~/.config/DronsioFlow/`; modelos e ambiente Python em
